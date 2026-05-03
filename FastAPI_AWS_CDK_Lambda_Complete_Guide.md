@@ -20,6 +20,7 @@ This guide is organized into detailed chapter files. Below is the complete index
 | **Part6_Interview.md** | Chapters 34-38: Interview questions for FastAPI, CDK, Lambda, K8s, system design |
 | **Part7_Projects.md** | 6 Complete projects with code |
 | **Part8_Templates_Reference.md** | Production templates and cheat sheets |
+| **Part9_Additional_Topics.md** | Docker, CI/CD, error handling, logging, AWS services deep dive |
 
 ---
 
@@ -1757,6 +1758,44 @@ helm create <chart-name>
 helm package <chart-directory>
 helm template <chart>  # Preview manifests
 ```
+
+---
+
+## Part X: Additional Topics (Deep Dives)
+
+### Chapter 47: Docker Fundamentals for FastAPI
+47.1 What is Docker?
+47.2 Docker Terminology
+47.3 Dockerfile for FastAPI (Development & Production)
+47.4 Docker Commands Cheat Sheet
+47.5 Docker Compose for Local Development
+
+### Chapter 48: CI/CD Pipelines
+48.1 What is CI/CD?
+48.2 GitHub Actions for FastAPI
+48.3 Build and Push Docker Image
+48.4 Deploy to AWS Lambda via CI/CD
+48.5 Deploy to EKS via CI/CD
+
+### Chapter 49: Error Handling Deep Dive
+49.1 Comprehensive Error Classes
+49.2 Custom Exception Handlers
+49.3 Structured Error Responses
+
+### Chapter 50: Logging and Monitoring
+50.1 Structured Logging with Python
+50.2 Request Logging Middleware
+50.3 CloudWatch Integration for Lambda
+
+### Chapter 51: AWS Services Deep Dive
+51.1 Route 53 (DNS) with CDK
+51.2 CloudFront (CDN) with CDK
+51.3 Cognito (Authentication) with CDK
+51.4 RDS (PostgreSQL) with CDK
+
+### Chapter 52: Performance Testing
+52.1 Load Testing with Locust
+52.2 Profiling FastAPI Applications
 
 ---
 
