@@ -21,6 +21,7 @@ This guide is organized into detailed chapter files. Below is the complete index
 | **Part7_Projects.md** | 6 Complete projects with code |
 | **Part8_Templates_Reference.md** | Production templates and cheat sheets |
 | **Part9_Additional_Topics.md** | Docker, CI/CD, error handling, logging, AWS services deep dive |
+| **Part10_Django_Microservices_CloudFormation.md** | Django + DRF, Microservices architecture & patterns, raw CloudFormation templates |
 
 ---
 

@@ -1343,6 +1343,9 @@ After reviewing, these topics are now covered:
 | Cognito (Authentication) | ✅ Added | Chapter 43 |
 | RDS (PostgreSQL) | ✅ Added | Chapter 43 |
 | Performance Testing | ✅ Added | Chapter 44 |
+| Django Framework (DRF, ORM, Admin) | ✅ Added | Chapter 45 (Part 10) |
+| Microservices Architecture & Patterns | ✅ Added | Chapter 46 (Part 10) |
+| CloudFormation Templates (raw YAML) | ✅ Added | Chapter 47 (Part 10) |
 
 ---
 
