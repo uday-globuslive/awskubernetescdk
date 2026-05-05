@@ -1,421 +1,1003 @@
-# Chapter 4: Storage — S3, EBS, EFS, Glacier & More
-## Object, Block, and File Storage Services
+# Chapter 4: Storage — S3, EBS, EFS, Glacier & Snow Family
+## Object Storage, Block Storage, File Storage, Archival & Data Transfer
 
 ---
 
-## 4.1 Storage Types Overview
+## 4.1 S3 — Simple Storage Service
+
+S3 is AWS's core object storage service. It stores any amount of data in buckets, accessible from anywhere via HTTP/HTTPS. S3 is the backbone of many AWS services.
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│                AWS STORAGE CATEGORIES                    │
-├──────────────┬──────────────────┬────────────────────────┤
-│ OBJECT       │ BLOCK            │ FILE                   │
-│ ────────     │ ─────            │ ────                   │
-│ S3           │ EBS              │ EFS (Linux)             │
-│ S3 Glacier   │ EC2 Instance     │ FSx for Windows         │
-│              │ Store            │ FSx for Lustre          │
-│ Flat storage │ Like a hard disk │ Like a network drive    │
-│ Access via   │ Attached to      │ Mounted by multiple     │
-│ HTTP API     │ ONE instance     │ instances simultaneously│
-│ Unlimited    │ Single AZ        │ Multi-AZ                │
-│ capacity     │ High IOPS        │ Shared access           │
-└──────────────┴──────────────────┴────────────────────────┘
+S3 Concepts:
+┌──────────────────────────────────────────────────────────────────┐
+│                         S3                                       │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │                    BUCKET (unique name globally)          │   │
+│  │  my-company-backups-prod (hosted in us-east-1)           │   │
+│  │                                                           │   │
+│  │  ┌──────────────┐  ┌──────────────┐  ┌───────────────┐  │   │
+│  │  │   OBJECT     │  │   OBJECT     │  │    OBJECT     │  │   │
+│  │  │ Key: logs/   │  │ Key: images/ │  │ Key: backup.  │  │   │
+│  │  │  app.log     │  │  logo.png    │  │  tar.gz       │  │   │
+│  │  │ Size: 5.3MB  │  │ Size: 45KB   │  │ Size: 2.1GB   │  │   │
+│  │  │ Metadata:... │  │ Metadata:... │  │ Metadata:...  │  │   │
+│  │  └──────────────┘  └──────────────┘  └───────────────┘  │   │
+│  └──────────────────────────────────────────────────────────┘   │
+│                                                                  │
+│  Object URL: https://BUCKET.s3.REGION.amazonaws.com/KEY        │
+│  Object ARN: arn:aws:s3:::BUCKET/KEY                            │
+└──────────────────────────────────────────────────────────────────┘
+
+Key facts:
+- Objects up to 5TB each
+- Bucket names must be globally unique across all AWS accounts
+- Objects stored across minimum 3 AZs (11 nines durability = 99.999999999%)
+- No folder structure — key name with "/" looks like folders (just naming)
+- S3 is global service but buckets are in a specific region
 ```
+
+### Durability and Availability
+
+| Class | Durability | Availability | Notes |
+|-------|-----------|--------------|-------|
+| Standard | 99.999999999% | 99.99% | Default for frequent access |
+| Standard-IA | 99.999999999% | 99.9% | Infrequent access, min 30-day charge |
+| One Zone-IA | 99.999999999% | 99.5% | Single AZ, 20% cheaper than Standard-IA |
+| Glacier Instant | 99.999999999% | 99.9% | Archive, millisecond retrieval |
+| Glacier Flexible | 99.999999999% | 99.99% | Archive, 1-12 hours retrieval |
+| Glacier Deep Archive | 99.999999999% | 99.99% | Cheapest, 12-48 hours retrieval |
+| Intelligent-Tiering | 99.999999999% | 99.9% | Auto-moves between tiers |
 
 ---
 
-## 4.2 S3 — Simple Storage Service
-
-S3 stores **objects** (files) in **buckets**. Infinitely scalable, 99.999999999% (11 9s) durability.
-
-### Core Concepts
-
-```
-Bucket → like a top-level folder (name must be globally unique)
-Object → file stored in a bucket
-Key    → full path of the object (e.g., "images/2024/photo.jpg")
-Value  → the content (bytes)
-
-Object size: 0 bytes to 5 TB
-Bucket: unlimited objects
-```
-
-### S3 CLI Essentials
+## 4.2 S3 Bucket Management
 
 ```bash
+# ── BUCKET OPERATIONS ─────────────────────────────────────────
 # Create bucket
-aws s3 mb s3://my-unique-bucket-name --region us-east-1
+aws s3api create-bucket \
+  --bucket my-company-data-prod \
+  --region us-east-1
+  # Note: for regions other than us-east-1, add:
+  # --create-bucket-configuration LocationConstraint=us-west-2
 
-# List buckets
-aws s3 ls
-
-# List objects
-aws s3 ls s3://my-bucket/
-aws s3 ls s3://my-bucket/images/ --recursive
-
-# Upload file
-aws s3 cp local-file.txt s3://my-bucket/path/file.txt
-
-# Upload entire folder
-aws s3 sync ./dist s3://my-bucket/website/
-
-# Download
-aws s3 cp s3://my-bucket/file.txt ./local-file.txt
-
-# Delete object
-aws s3 rm s3://my-bucket/file.txt
-
-# Delete bucket (must be empty first, or use --force)
-aws s3 rb s3://my-bucket --force
-
-# Generate presigned URL (temporary access, no auth needed)
-aws s3 presign s3://my-bucket/private-file.pdf --expires-in 3600
-```
-
-### S3 Storage Classes
-
-```
-┌───────────────────────────────────────────────────────────────┐
-│                   S3 STORAGE CLASSES                          │
-├─────────────────────┬────────────┬──────────────┬────────────┤
-│ Class               │ Retrieval  │ Min Duration │ Use Case   │
-├─────────────────────┼────────────┼──────────────┼────────────┤
-│ Standard            │ ms         │ None         │ Frequent   │
-│                     │            │              │ access     │
-├─────────────────────┼────────────┼──────────────┼────────────┤
-│ Standard-IA         │ ms         │ 30 days      │ Infrequent │
-│ (Infrequent Access) │            │              │ access     │
-├─────────────────────┼────────────┼──────────────┼────────────┤
-│ One Zone-IA         │ ms         │ 30 days      │ Infrequent,│
-│                     │            │              │ single AZ  │
-├─────────────────────┼────────────┼──────────────┼────────────┤
-│ Intelligent-Tiering │ ms-hrs     │ None         │ Unknown    │
-│                     │            │              │ patterns   │
-├─────────────────────┼────────────┼──────────────┼────────────┤
-│ Glacier Instant     │ ms         │ 90 days      │ Archive,   │
-│ Retrieval           │            │              │ rare access│
-├─────────────────────┼────────────┼──────────────┼────────────┤
-│ Glacier Flexible    │ min–hrs    │ 90 days      │ Archives   │
-│ Retrieval           │            │              │            │
-├─────────────────────┼────────────┼──────────────┼────────────┤
-│ Glacier Deep        │ 12–48 hrs  │ 180 days     │ Long-term  │
-│ Archive             │            │              │ compliance │
-└─────────────────────┴────────────┴──────────────┴────────────┘
-```
-
-### S3 Lifecycle Policies
-
-Automatically transition objects between storage classes or delete them.
-
-```json
-// lifecycle.json
-{
-  "Rules": [
-    {
-      "ID": "move-to-ia-then-glacier",
-      "Status": "Enabled",
-      "Filter": {"Prefix": "logs/"},
-      "Transitions": [
-        {
-          "Days": 30,
-          "StorageClass": "STANDARD_IA"
-        },
-        {
-          "Days": 90,
-          "StorageClass": "GLACIER"
-        }
-      ],
-      "Expiration": {
-        "Days": 365
-      }
-    }
-  ]
-}
-```
-
-```bash
-aws s3api put-bucket-lifecycle-configuration \
-  --bucket my-bucket \
-  --lifecycle-configuration file://lifecycle.json
-```
-
-### S3 Versioning
-
-Keep multiple versions of an object. Protects against accidental deletes.
-
-```bash
-# Enable versioning
+# Enable versioning (CANNOT disable once enabled, only suspend)
 aws s3api put-bucket-versioning \
-  --bucket my-bucket \
+  --bucket my-company-data-prod \
   --versioning-configuration Status=Enabled
 
-# List versions
-aws s3api list-object-versions --bucket my-bucket --prefix myfile.txt
-
-# Restore deleted file (delete the delete marker)
-aws s3api delete-object \
-  --bucket my-bucket \
-  --key myfile.txt \
-  --version-id <delete-marker-version-id>
-```
-
-### S3 Security
-
-```bash
-# Block all public access (should be ON for most buckets)
+# Block all public access (recommended for non-static-website buckets)
 aws s3api put-public-access-block \
-  --bucket my-bucket \
+  --bucket my-company-data-prod \
   --public-access-block-configuration \
-    BlockPublicAcls=true,IgnorePublicAcls=true,\
-    BlockPublicPolicy=true,RestrictPublicBuckets=true
+    "BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true"
 
-# Enable server-side encryption (default since 2023)
+# Enable default server-side encryption
 aws s3api put-bucket-encryption \
-  --bucket my-bucket \
+  --bucket my-company-data-prod \
   --server-side-encryption-configuration '{
     "Rules": [{
       "ApplyServerSideEncryptionByDefault": {
         "SSEAlgorithm": "aws:kms",
-        "KMSMasterKeyID": "arn:aws:kms:us-east-1:123456:key/abc-123"
+        "KMSMasterKeyID": "arn:aws:kms:us-east-1:123:key/abc123"
+      },
+      "BucketKeyEnabled": true
+    }]
+  }'
+
+# Enable S3 access logging
+aws s3api put-bucket-logging \
+  --bucket my-company-data-prod \
+  --bucket-logging-status '{
+    "LoggingEnabled": {
+      "TargetBucket": "my-access-logs-bucket",
+      "TargetPrefix": "my-company-data-prod/"
+    }
+  }'
+
+# Require TLS (HTTPS only) — bucket policy
+aws s3api put-bucket-policy \
+  --bucket my-company-data-prod \
+  --policy '{
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Sid": "DenyHTTP",
+      "Effect": "Deny",
+      "Principal": "*",
+      "Action": "s3:*",
+      "Resource": [
+        "arn:aws:s3:::my-company-data-prod",
+        "arn:aws:s3:::my-company-data-prod/*"
+      ],
+      "Condition": {
+        "Bool": {"aws:SecureTransport": "false"}
       }
     }]
   }'
 
-# Enable access logging
-aws s3api put-bucket-logging \
-  --bucket my-bucket \
-  --bucket-logging-status '{
-    "LoggingEnabled": {
-      "TargetBucket": "my-logs-bucket",
-      "TargetPrefix": "s3-access-logs/"
+# Enable S3 Object Lock (WORM — Write Once Read Many)
+# Must be enabled at bucket creation — cannot enable later
+aws s3api create-bucket \
+  --bucket compliance-archive \
+  --object-lock-enabled-for-bucket \
+  --region us-east-1
+
+# Set default Object Lock retention
+aws s3api put-object-lock-configuration \
+  --bucket compliance-archive \
+  --object-lock-configuration '{
+    "ObjectLockEnabled": "Enabled",
+    "Rule": {
+      "DefaultRetention": {
+        "Mode": "COMPLIANCE",
+        "Years": 7
+      }
     }
   }'
 ```
 
-### S3 Event Notifications
+---
 
-Trigger Lambda/SQS/SNS when objects are uploaded.
+## 4.3 S3 Object Operations
 
 ```bash
+# ── UPLOAD / DOWNLOAD ─────────────────────────────────────────
+# Upload with metadata and encryption
+aws s3api put-object \
+  --bucket my-bucket \
+  --key data/2025/file.csv \
+  --body ./file.csv \
+  --server-side-encryption aws:kms \
+  --metadata "created-by=pipeline,version=1.0" \
+  --content-type "text/csv"
+
+# Upload with Server-Side Encryption using bucket key
+aws s3 cp file.csv s3://my-bucket/data/ \
+  --sse aws:kms \
+  --sse-kms-key-id alias/my-key
+
+# Sync directory (upload changed files only)
+aws s3 sync ./data/ s3://my-bucket/data/ \
+  --delete \                          # Delete remote files not in local
+  --exclude "*.tmp" \                 # Skip temp files
+  --include "*.csv" \                 # But include CSV
+  --sse aws:kms
+
+# Download
+aws s3 cp s3://my-bucket/data/file.csv ./local/
+
+# Download all with prefix
+aws s3 sync s3://my-bucket/data/ ./local-data/
+
+# ── OBJECT METADATA ───────────────────────────────────────────
+# Get object metadata (HEAD request)
+aws s3api head-object \
+  --bucket my-bucket \
+  --key data/file.csv
+
+# List objects with versions
+aws s3api list-object-versions \
+  --bucket my-bucket \
+  --prefix data/ \
+  --query "Versions[*].[Key,VersionId,LastModified,IsLatest]" \
+  --output table
+
+# Get specific version
+aws s3api get-object \
+  --bucket my-bucket \
+  --key data/file.csv \
+  --version-id XXXXXXXX \
+  ./downloaded-old-version.csv
+
+# Delete object (creates delete marker if versioning enabled)
+aws s3 rm s3://my-bucket/data/file.csv
+
+# Permanently delete with version ID
+aws s3api delete-object \
+  --bucket my-bucket \
+  --key data/file.csv \
+  --version-id XXXXXXXX
+
+# ── BATCH OPERATIONS ──────────────────────────────────────────
+# Generate inventory for batch operations
+aws s3api put-bucket-inventory-configuration \
+  --bucket my-bucket \
+  --id daily-inventory \
+  --inventory-configuration '{
+    "Id": "daily-inventory",
+    "IsEnabled": true,
+    "Destination": {
+      "S3BucketDestination": {
+        "Bucket": "arn:aws:s3:::my-inventory-bucket",
+        "Format": "CSV"
+      }
+    },
+    "Schedule": {"Frequency": "Daily"},
+    "IncludedObjectVersions": "All",
+    "OptionalFields": ["Size","LastModifiedDate","ETag","StorageClass"]
+  }'
+
+# Pre-signed URL (temporary access, no credentials needed)
+aws s3 presign s3://my-bucket/private/report.pdf \
+  --expires-in 3600     # 1 hour
+
+# Python: generate pre-signed URL
+python3 << 'EOF'
+import boto3
+from botocore.config import Config
+
+s3 = boto3.client('s3', config=Config(signature_version='s3v4'))
+url = s3.generate_presigned_url(
+    'get_object',
+    Params={'Bucket': 'my-bucket', 'Key': 'private/report.pdf'},
+    ExpiresIn=3600
+)
+print(url)
+EOF
+```
+
+---
+
+## 4.4 S3 Storage Classes & Lifecycle Rules
+
+### Storage Class Decision
+
+```
+When to use each class:
+┌────────────────────┬─────────────────────────────────────────────┐
+│ Class              │ When to use                                 │
+├────────────────────┼─────────────────────────────────────────────┤
+│ Standard           │ Frequently accessed data (<30 days)         │
+│ Intelligent-Tiering│ Access patterns unknown/variable            │
+│ Standard-IA        │ Accessed < once/month, min 30-day billing  │
+│ One Zone-IA        │ Non-critical, reproducible, min 30-day      │
+│ Glacier Instant    │ Archive, retrieved < once/quarter           │
+│ Glacier Flexible   │ Archive, ok with 1-12 hour retrieval        │
+│ Glacier Deep       │ 7+ year compliance archive, 12-48 hour OK  │
+└────────────────────┴─────────────────────────────────────────────┘
+
+Cost comparison (per GB/month, approximate):
+  Standard:           $0.023
+  Standard-IA:        $0.0125  (-46%)
+  One Zone-IA:        $0.01    (-57%)
+  Glacier Instant:    $0.004   (-83%)
+  Glacier Flexible:   $0.0036  (-84%)
+  Glacier Deep:       $0.00099 (-96%)
+```
+
+### Lifecycle Rules
+
+```bash
+# Configure lifecycle rules
+aws s3api put-bucket-lifecycle-configuration \
+  --bucket my-company-data-prod \
+  --lifecycle-configuration '{
+    "Rules": [
+      {
+        "ID": "log-lifecycle",
+        "Status": "Enabled",
+        "Filter": {"Prefix": "logs/"},
+        "Transitions": [
+          {"Days": 30, "StorageClass": "STANDARD_IA"},
+          {"Days": 90, "StorageClass": "GLACIER"},
+          {"Days": 365, "StorageClass": "DEEP_ARCHIVE"}
+        ],
+        "Expiration": {"Days": 2557}
+      },
+      {
+        "ID": "delete-incomplete-multipart",
+        "Status": "Enabled",
+        "Filter": {},
+        "AbortIncompleteMultipartUpload": {"DaysAfterInitiation": 7}
+      },
+      {
+        "ID": "clean-old-versions",
+        "Status": "Enabled",
+        "Filter": {"Prefix": ""},
+        "NoncurrentVersionTransitions": [
+          {"NoncurrentDays": 30, "StorageClass": "GLACIER"}
+        ],
+        "NoncurrentVersionExpiration": {"NoncurrentDays": 90}
+      }
+    ]
+  }'
+
+# View lifecycle rules
+aws s3api get-bucket-lifecycle-configuration --bucket my-company-data-prod
+```
+
+---
+
+## 4.5 S3 Event Notifications & Lambda Integration
+
+```bash
+# Trigger Lambda when object uploaded to S3
+# First, add permission for S3 to invoke Lambda
+aws lambda add-permission \
+  --function-name process-upload \
+  --principal s3.amazonaws.com \
+  --statement-id s3-trigger \
+  --action lambda:InvokeFunction \
+  --source-arn arn:aws:s3:::my-bucket \
+  --source-account 123456789012
+
+# Configure event notification on bucket
 aws s3api put-bucket-notification-configuration \
   --bucket my-bucket \
   --notification-configuration '{
-    "LambdaFunctionConfigurations": [{
-      "LambdaFunctionArn": "arn:aws:lambda:us-east-1:123456:function:process-upload",
-      "Events": ["s3:ObjectCreated:*"],
-      "Filter": {
-        "Key": {
-          "FilterRules": [
-            {"Name": "prefix", "Value": "uploads/"},
-            {"Name": "suffix", "Value": ".jpg"}
-          ]
+    "LambdaFunctionConfigurations": [
+      {
+        "LambdaFunctionArn": "arn:aws:lambda:us-east-1:123:function:process-upload",
+        "Events": ["s3:ObjectCreated:*"],
+        "Filter": {
+          "Key": {
+            "FilterRules": [
+              {"Name": "prefix", "Value": "uploads/"},
+              {"Name": "suffix", "Value": ".jpg"}
+            ]
+          }
+        }
+      }
+    ],
+    "QueueConfigurations": [
+      {
+        "QueueArn": "arn:aws:sqs:us-east-1:123:processing-queue",
+        "Events": ["s3:ObjectCreated:Put"],
+        "Filter": {"Key": {"FilterRules": [{"Name": "prefix", "Value": "data/"}]}}
+      }
+    ],
+    "TopicConfigurations": [
+      {
+        "TopicArn": "arn:aws:sns:us-east-1:123:s3-alerts",
+        "Events": ["s3:ObjectRemoved:*", "s3:Replication:OperationMissedThreshold"]
+      }
+    ]
+  }'
+```
+
+```python
+# Lambda function to process S3 events
+import boto3
+import json
+import urllib.parse
+
+s3 = boto3.client('s3')
+
+def handler(event, context):
+    for record in event['Records']:
+        bucket = record['s3']['bucket']['name']
+        key = urllib.parse.unquote_plus(record['s3']['object']['key'])
+        size = record['s3']['object']['size']
+        event_type = record['eventName']
+        
+        print(f"Event: {event_type} | Bucket: {bucket} | Key: {key} | Size: {size}")
+        
+        if event_type.startswith('ObjectCreated'):
+            # Process the uploaded file
+            response = s3.get_object(Bucket=bucket, Key=key)
+            content = response['Body'].read()
+            
+            # Do something with content...
+            process_file(bucket, key, content)
+    
+    return {'statusCode': 200}
+
+def process_file(bucket, key, content):
+    # Example: generate thumbnail, process CSV, etc.
+    pass
+```
+
+---
+
+## 4.6 S3 Replication
+
+### Cross-Region Replication (CRR) & Same-Region Replication (SRR)
+
+```bash
+# Enable versioning on both buckets (required for replication)
+aws s3api put-bucket-versioning \
+  --bucket source-bucket \
+  --versioning-configuration Status=Enabled
+
+aws s3api put-bucket-versioning \
+  --bucket dest-bucket-us-west-2 \
+  --versioning-configuration Status=Enabled
+
+# Create replication role
+cat > replication-trust.json << 'EOF'
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Principal": {"Service": "s3.amazonaws.com"},
+    "Action": "sts:AssumeRole"
+  }]
+}
+EOF
+
+aws iam create-role \
+  --role-name S3ReplicationRole \
+  --assume-role-policy-document file://replication-trust.json
+
+aws iam put-role-policy \
+  --role-name S3ReplicationRole \
+  --policy-name ReplicationPolicy \
+  --policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Effect": "Allow",
+        "Action": ["s3:GetReplicationConfiguration", "s3:ListBucket"],
+        "Resource": "arn:aws:s3:::source-bucket"
+      },
+      {
+        "Effect": "Allow",
+        "Action": ["s3:GetObjectVersionForReplication", "s3:GetObjectVersionAcl", "s3:GetObjectVersionTagging"],
+        "Resource": "arn:aws:s3:::source-bucket/*"
+      },
+      {
+        "Effect": "Allow",
+        "Action": ["s3:ReplicateObject", "s3:ReplicateDelete", "s3:ReplicateTags"],
+        "Resource": "arn:aws:s3:::dest-bucket-us-west-2/*"
+      }
+    ]
+  }'
+
+# Configure replication
+aws s3api put-bucket-replication \
+  --bucket source-bucket \
+  --replication-configuration '{
+    "Role": "arn:aws:iam::123:role/S3ReplicationRole",
+    "Rules": [{
+      "ID": "replicate-all",
+      "Status": "Enabled",
+      "Filter": {},
+      "DeleteMarkerReplication": {"Status": "Enabled"},
+      "Destination": {
+        "Bucket": "arn:aws:s3:::dest-bucket-us-west-2",
+        "StorageClass": "STANDARD_IA",
+        "EncryptionConfiguration": {
+          "ReplicaKmsKeyID": "arn:aws:kms:us-west-2:123:key/dest-key"
         }
       }
     }]
   }'
-```
 
-### S3 as a Static Website
-
-```bash
-# Enable static website hosting
-aws s3 website s3://my-bucket \
-  --index-document index.html \
-  --error-document error.html
-
-# Bucket policy for public website
-aws s3api put-bucket-policy --bucket my-bucket --policy '{
-  "Statement": [{
-    "Effect": "Allow",
-    "Principal": "*",
-    "Action": "s3:GetObject",
-    "Resource": "arn:aws:s3:::my-bucket/*"
-  }]
-}'
-
-# Sync React/Vue build to S3
-aws s3 sync ./build s3://my-bucket --delete
-# URL: http://my-bucket.s3-website-us-east-1.amazonaws.com
-# (Use CloudFront in front for HTTPS and custom domain)
+# Check replication status
+aws s3api head-object \
+  --bucket source-bucket \
+  --key myfile.csv \
+  --query "ReplicationStatus"  # PENDING, COMPLETED, FAILED, REPLICA
 ```
 
 ---
 
-## 4.3 S3 Advanced Features
-
-### Multipart Upload (files > 100 MB)
-
-```python
-import boto3
-
-s3 = boto3.client("s3")
-
-# High-level transfer (handles multipart automatically)
-s3.upload_file(
-    Filename="large-file.zip",
-    Bucket="my-bucket",
-    Key="uploads/large-file.zip",
-    ExtraArgs={"StorageClass": "STANDARD_IA"},
-    Config=boto3.s3.transfer.TransferConfig(
-        multipart_threshold=100 * 1024 * 1024,   # 100 MB
-        multipart_chunksize=50 * 1024 * 1024,    # 50 MB chunks
-        max_concurrency=10,
-    )
-)
-```
-
-### Presigned URLs
-
-```python
-import boto3
-
-s3 = boto3.client("s3")
-
-# Generate upload URL (user uploads directly to S3, no server involved)
-presigned_url = s3.generate_presigned_post(
-    Bucket="my-bucket",
-    Key="uploads/${filename}",
-    Fields={"Content-Type": "image/jpeg"},
-    Conditions=[
-        ["content-length-range", 0, 10 * 1024 * 1024]  # Max 10 MB
-    ],
-    ExpiresIn=3600
-)
-
-# Generate download URL
-download_url = s3.generate_presigned_url(
-    "get_object",
-    Params={"Bucket": "my-bucket", "Key": "private/file.pdf"},
-    ExpiresIn=300  # 5 minutes
-)
-```
-
-### S3 Replication
+## 4.7 S3 Static Website Hosting
 
 ```bash
-# Cross-Region Replication (CRR) — disaster recovery
-# Same-Region Replication (SRR) — log aggregation
+# Enable static website hosting
+aws s3api put-bucket-website \
+  --bucket my-website.example.com \
+  --website-configuration '{
+    "IndexDocument": {"Suffix": "index.html"},
+    "ErrorDocument": {"Key": "error.html"},
+    "RoutingRules": [{
+      "Condition": {"HttpErrorCodeReturnedEquals": "404"},
+      "Redirect": {"ReplaceKeyWith": "index.html"}
+    }]
+  }'
 
-# Requires versioning enabled on both buckets
-# Configure via console or JSON:
-aws s3api put-bucket-replication \
-  --bucket source-bucket \
-  --replication-configuration '{
-    "Role": "arn:aws:iam::123456:role/s3-replication-role",
-    "Rules": [{
-      "Status": "Enabled",
-      "Destination": {
-        "Bucket": "arn:aws:s3:::destination-bucket",
-        "ReplicationTime": {"Status": "Enabled", "Time": {"Minutes": 15}},
-        "StorageClass": "STANDARD_IA"
-      }
+# Update bucket policy for public read (for static sites only!)
+aws s3api put-public-access-block \
+  --bucket my-website.example.com \
+  --public-access-block-configuration \
+    "BlockPublicAcls=false,IgnorePublicAcls=false,BlockPublicPolicy=false,RestrictPublicBuckets=false"
+
+aws s3api put-bucket-policy \
+  --bucket my-website.example.com \
+  --policy '{
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Effect": "Allow",
+      "Principal": "*",
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::my-website.example.com/*"
+    }]
+  }'
+
+# Upload site
+aws s3 sync ./dist/ s3://my-website.example.com/ \
+  --delete \
+  --cache-control "max-age=86400" \
+  --exclude "*.html"
+
+# No-cache for HTML files
+aws s3 sync ./dist/ s3://my-website.example.com/ \
+  --include "*.html" \
+  --cache-control "no-cache"
+
+# Website endpoint (not HTTPS — use CloudFront for HTTPS)
+echo "http://my-website.example.com.s3-website-us-east-1.amazonaws.com"
+```
+
+---
+
+## 4.8 S3 Access Points & Multi-Region Access Points
+
+### S3 Access Points
+
+Access Points simplify managing access to shared datasets.
+
+```bash
+# Create access point (for specific team/application)
+aws s3control create-access-point \
+  --account-id 123456789012 \
+  --name data-science-access \
+  --bucket my-data-lake \
+  --vpc-configuration VpcId=vpc-0abc123
+
+# Set access point policy (restrict to data-science role only)
+aws s3control put-access-point-policy \
+  --account-id 123456789012 \
+  --name data-science-access \
+  --policy '{
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Effect": "Allow",
+      "Principal": {"AWS": "arn:aws:iam::123456789012:role/DataScienceRole"},
+      "Action": ["s3:GetObject", "s3:PutObject"],
+      "Resource": "arn:aws:s3:us-east-1:123456789012:accesspoint/data-science-access/object/*"
+    }]
+  }'
+
+# Access via access point ARN
+aws s3api get-object \
+  --bucket arn:aws:s3:us-east-1:123456789012:accesspoint/data-science-access \
+  --key data/model-training.csv \
+  ./local-file.csv
+```
+
+---
+
+## 4.9 S3 Intelligent-Tiering
+
+```bash
+# Enable Intelligent-Tiering on bucket (recommended for mixed-access datasets)
+aws s3api put-bucket-intelligent-tiering-configuration \
+  --bucket my-data-lake \
+  --id my-tiering-config \
+  --intelligent-tiering-configuration '{
+    "Id": "my-tiering-config",
+    "Status": "Enabled",
+    "Tierings": [
+      {"Days": 90, "AccessTier": "ARCHIVE_ACCESS"},
+      {"Days": 180, "AccessTier": "DEEP_ARCHIVE_ACCESS"}
+    ]
+  }'
+```
+
+---
+
+## 4.10 S3 Analytics & S3 Select
+
+```bash
+# S3 Select — query CSV/JSON/Parquet without downloading entire object
+aws s3api select-object-content \
+  --bucket my-bucket \
+  --key data/users.csv \
+  --expression "SELECT s.name, s.email FROM S3Object s WHERE s.age > 30" \
+  --expression-type SQL \
+  --input-serialization '{"CSV": {"FileHeaderInfo": "USE", "RecordDelimiter": "\n"}}' \
+  --output-serialization '{"CSV": {}}' \
+  output.csv
+
+# Python: S3 Select
+import boto3
+
+s3 = boto3.client('s3')
+response = s3.select_object_content(
+    Bucket='my-bucket',
+    Key='data/orders.csv',
+    ExpressionType='SQL',
+    Expression="SELECT * FROM S3Object WHERE amount > 1000",
+    InputSerialization={
+        'CSV': {'FileHeaderInfo': 'USE'},
+        'CompressionType': 'GZIP'
+    },
+    OutputSerialization={'CSV': {}},
+)
+
+for event in response['Payload']:
+    if 'Records' in event:
+        print(event['Records']['Payload'].decode('utf-8'))
+```
+
+---
+
+## 4.11 EBS — Extended Reference
+
+(EBS basics in Chapter 3 — deeper topics here)
+
+### EBS Multi-Attach (io1/io2 only)
+
+Attach the same EBS volume to multiple EC2 instances in the same AZ:
+- Limited to io1/io2 volumes
+- Up to 16 Linux Nitro instances
+- Cluster-aware file system required (e.g., GFS2)
+- Use case: high-availability storage applications, Oracle RAC
+
+```bash
+aws ec2 create-volume \
+  --availability-zone us-east-1a \
+  --volume-type io2 \
+  --size 100 \
+  --iops 3000 \
+  --multi-attach-enabled
+
+aws ec2 attach-volume --volume-id vol-0abc --instance-id i-0001 --device /dev/xvdf
+aws ec2 attach-volume --volume-id vol-0abc --instance-id i-0002 --device /dev/xvdf
+```
+
+### EBS Snapshots — Advanced
+
+```bash
+# Enable EBS snapshot archiving (cheaper storage for rarely accessed snapshots)
+aws ec2 modify-snapshot-tier \
+  --snapshot-id snap-0abc123 \
+  --storage-tier archive
+
+# Restore archived snapshot (takes 24-72 hours)
+aws ec2 restore-snapshot-tier \
+  --snapshot-id snap-0abc123 \
+  --temporary-restore-days 3   # Restore temporarily for 3 days
+  # Or without flag: permanent restore (moves back to standard)
+
+# Copy snapshot to another account
+aws ec2 modify-snapshot-attribute \
+  --snapshot-id snap-0abc123 \
+  --attribute createVolumePermission \
+  --operation-type add \
+  --user-ids 987654321098
+
+# Amazon Data Lifecycle Manager (DLM) — automated snapshot policy
+aws dlm create-lifecycle-policy \
+  --description "Daily snapshots for prod databases" \
+  --state ENABLED \
+  --execution-role-arn arn:aws:iam::123:role/DLMRole \
+  --policy-details '{
+    "PolicyType": "EBS_SNAPSHOT_MANAGEMENT",
+    "ResourceTypes": ["INSTANCE"],
+    "TargetTags": [{"Key": "backup", "Value": "daily"}],
+    "Schedules": [{
+      "Name": "Daily snapshots",
+      "CreateRule": {"Interval": 24, "IntervalUnit": "HOURS", "Times": ["03:00"]},
+      "RetainRule": {"Count": 7},
+      "CopyTags": true
     }]
   }'
 ```
 
 ---
 
-## 4.4 EFS — Elastic File System
+## 4.12 EFS — Elastic File System
 
-**EFS** is a managed **NFS file system** that can be mounted by multiple EC2 instances simultaneously — across AZs.
+### EFS Performance Modes
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│                    EFS USE CASE                          │
-│                                                          │
-│  EC2 (AZ-1a)  EC2 (AZ-1a)  EC2 (AZ-1b)                 │
-│      │              │              │                     │
-│      └──────────────┼──────────────┘                     │
-│                     │                                    │
-│              ┌──────────────┐                            │
-│              │     EFS      │ ← Shared file system       │
-│              │  (NFS v4.1)  │   All instances see        │
-│              └──────────────┘   the same files           │
-│                                                          │
-│  Use for: shared config, media storage, ML datasets,     │
-│           WordPress uploads, CI/CD artifact storage      │
-└──────────────────────────────────────────────────────────┘
+Performance Modes:
+  General Purpose:  Default, balanced for most workloads
+  Max I/O:         Higher aggregate throughput, higher latency, for highly parallel
+
+Throughput Modes:
+  Bursting:        Throughput scales with storage size (50MB/s/TB base + burst credits)
+  Provisioned:     Set throughput independent of storage size
+  Elastic:         Auto-scales up/down based on actual usage (recommended)
+
+Storage Classes:
+  Standard:        Frequently accessed data
+  Infrequent Access (IA): Lower cost, per-request access fee (auto-tiering available)
 ```
 
 ```bash
-# Create EFS file system
+# Create EFS with lifecycle management
 aws efs create-file-system \
   --performance-mode generalPurpose \
-  --throughput-mode bursting \
+  --throughput-mode elastic \
   --encrypted \
-  --tags Key=Name,Value=my-shared-fs
+  --kms-key-id arn:aws:kms:us-east-1:123:key/abc \
+  --lifecycle-policies '[
+    {"TransitionToIA": "AFTER_30_DAYS"},
+    {"TransitionToPrimaryStorageClass": "AFTER_1_ACCESS"}
+  ]' \
+  --tags Key=Name,Value=shared-files
 
-# Create mount targets (one per AZ)
-aws efs create-mount-target \
-  --file-system-id fs-0abc123 \
-  --subnet-id subnet-0abc123 \
-  --security-groups sg-0abc123
+FS_ID=$(aws efs describe-file-systems \
+  --query "FileSystems[?Name=='shared-files'].FileSystemId" --output text)
 
-# Mount on EC2 (after installing amazon-efs-utils)
-sudo mount -t efs fs-0abc123:/ /mnt/shared
+# Create mount targets in each AZ
+for SUBNET in subnet-0abc subnet-0def subnet-0ghi; do
+  aws efs create-mount-target \
+    --file-system-id $FS_ID \
+    --subnet-id $SUBNET \
+    --security-groups sg-efs-0abc
+done
 
-# Or in /etc/fstab for persistent mount
-# fs-0abc123:/ /mnt/shared efs defaults,_netdev 0 0
+# Create access point (application-specific entry point)
+aws efs create-access-point \
+  --file-system-id $FS_ID \
+  --posix-user "Uid=1000,Gid=1000" \
+  --root-directory-creation-info "OwnerUid=1000,OwnerGid=1000,Permissions=755" \
+  --root-directory Path=/myapp \
+  --tags Key=Name,Value=myapp-access-point
+
+# Mount with EFS access point
+sudo mount -t efs -o tls,accesspoint=fsap-0abc123 $FS_ID:/ /mnt/efs/myapp
+
+# Mount EFS in container (ECS task definition)
+# See Chapter 8 for ECS volume configuration
 ```
 
-**EFS vs EBS:**
-- EBS: one instance, block storage, high IOPS, same AZ required
-- EFS: many instances, file storage, auto-scales, multi-AZ
+### EFS Backup
 
----
+```bash
+# Enable automatic backups
+aws efs put-backup-policy \
+  --file-system-id $FS_ID \
+  --backup-policy Status=ENABLED
 
-## 4.5 S3 Glacier — Long-Term Archive
+# Manual backup using AWS Backup
+aws backup create-backup-vault --backup-vault-name efs-backups
 
-Glacier is ultra-cheap archival storage. Not for frequent access.
-
-```
-┌──────────────────────────────────────────────────────────┐
-│              GLACIER RETRIEVAL OPTIONS                   │
-├──────────────────────┬────────────┬──────────────────────┤
-│ Expedited            │ 1–5 min    │ Most expensive        │
-│ Standard             │ 3–5 hours  │ Default              │
-│ Bulk                 │ 5–12 hours │ Cheapest             │
-└──────────────────────┴────────────┴──────────────────────┘
-
-Cost comparison (vs S3 Standard):
-S3 Standard:          $0.023/GB/month
-S3 Glacier Flexible:  $0.004/GB/month  (83% cheaper)
-S3 Glacier Deep:      $0.00099/GB/month (96% cheaper)
-```
-
----
-
-## 4.6 Storage Gateway
-
-Connects on-premises environments to AWS storage.
-
-```
-On-Premises                   AWS Cloud
-────────────                  ─────────
-┌──────────┐                  ┌──────────────────┐
-│ Servers  │──── Storage ────►│  S3 / Glacier    │
-│ Backups  │   Gateway        │  EBS snapshots   │
-└──────────┘   (VM or         └──────────────────┘
-               hardware)
-
-Types:
-• File Gateway   → NFS/SMB → S3 (file shares)
-• Volume Gateway → iSCSI block storage → EBS snapshots
-• Tape Gateway   → Virtual tape library → Glacier
+aws backup start-backup-job \
+  --backup-vault-name efs-backups \
+  --resource-arn arn:aws:elasticfilesystem:us-east-1:123:file-system/$FS_ID \
+  --iam-role-arn arn:aws:iam::123:role/AWSBackupRole
 ```
 
 ---
 
-## 4.7 Key S3 Interview Questions
+## 4.13 FSx — Managed File Systems
 
-**Q: How do you secure an S3 bucket?**
-> Multiple layers: (1) Block Public Access enabled — prevents any public access regardless of ACLs/policies. (2) Bucket policy restricting access to specific IAM roles or VPC endpoints. (3) Server-side encryption at rest (SSE-KMS or SSE-S3). (4) Enable versioning to protect against accidental deletes. (5) Enable access logging to S3 Access Logs. (6) Use S3 Object Lock for compliance scenarios (WORM — Write Once Read Many).
+### FSx for Windows File Server
 
-**Q: What's the difference between S3 and EBS?**
-> S3 is object storage accessed via HTTP API — unlimited scale, any number of clients, globally accessible but with higher latency. EBS is block storage — like a hard drive — attached to a single EC2 instance in the same AZ, very low latency (sub-millisecond), ideal for databases and OS volumes.
+Fully managed Windows SMB file shares (Active Directory integration):
 
-**Q: How would you host a static website cheaply on AWS?**
-> Upload static files (HTML, CSS, JS) to an S3 bucket with static website hosting enabled. Put CloudFront in front for HTTPS, custom domain, and global CDN. Use Route53 for DNS. Total cost is typically cents per month. No servers needed.
+```bash
+aws fsx create-file-system \
+  --file-system-type WINDOWS \
+  --storage-capacity 300 \
+  --storage-type SSD \
+  --subnet-ids subnet-0abc123 subnet-0def456 \
+  --windows-configuration '{
+    "ActiveDirectoryId": "d-0abc123",
+    "ThroughputCapacity": 64,
+    "WeeklyMaintenanceStartTime": "1:05:00",
+    "DailyAutomaticBackupStartTime": "04:00",
+    "AutomaticBackupRetentionDays": 30,
+    "DeploymentType": "MULTI_AZ_1",
+    "PreferredSubnetId": "subnet-0abc123"
+  }'
+```
+
+### FSx for Lustre
+
+High-performance parallel file system for HPC, machine learning:
+
+```bash
+aws fsx create-file-system \
+  --file-system-type LUSTRE \
+  --storage-capacity 1200 \
+  --subnet-ids subnet-0abc123 \
+  --lustre-configuration '{
+    "ImportPath": "s3://my-data-lake/training-data/",
+    "ExportPath": "s3://my-data-lake/results/",
+    "ImportedFileChunkSize": 1024,
+    "DeploymentType": "SCRATCH_2",
+    "PerUnitStorageThroughput": 200
+  }'
+```
+
+### FSx for NetApp ONTAP
+
+```bash
+aws fsx create-file-system \
+  --file-system-type ONTAP \
+  --storage-capacity 1024 \
+  --subnet-ids subnet-0abc subnet-0def \
+  --ontap-configuration '{
+    "DeploymentType": "MULTI_AZ_1",
+    "PreferredSubnetId": "subnet-0abc",
+    "ThroughputCapacity": 256
+  }'
+```
+
+---
+
+## 4.14 S3 Glacier — Archive Storage
+
+### Glacier Storage Classes via S3 Lifecycle (Recommended)
+
+Use S3 lifecycle rules to automatically move data to Glacier (see section 4.4).
+
+### Direct Glacier Vault Operations (Legacy)
+
+```bash
+# Create vault
+aws glacier create-vault \
+  --account-id - \
+  --vault-name my-archive-vault
+
+# Upload archive
+aws glacier upload-archive \
+  --account-id - \
+  --vault-name my-archive-vault \
+  --body ./backup.tar.gz
+
+# List vaults
+aws glacier list-vaults --account-id -
+
+# Initiate retrieval job (Glacier Flexible — takes 1-12 hours)
+aws glacier initiate-job \
+  --account-id - \
+  --vault-name my-archive-vault \
+  --job-parameters '{
+    "Type": "archive-retrieval",
+    "ArchiveId": "archive-id-here",
+    "Tier": "Standard",
+    "Description": "Emergency retrieval"
+  }'
+# Tier options: Expedited (1-5 min, expensive), Standard (3-5 hr), Bulk (5-12 hr)
+
+# Check job status
+aws glacier list-jobs --account-id - --vault-name my-archive-vault
+
+# Download when complete
+aws glacier get-job-output \
+  --account-id - \
+  --vault-name my-archive-vault \
+  --job-id job-id-here \
+  ./retrieved-archive.tar.gz
+```
+
+---
+
+## 4.15 AWS Snow Family
+
+The Snow Family helps move large amounts of data to/from AWS when internet transfer is too slow or expensive.
+
+```
+┌────────────────────────────────────────────────────────────────────┐
+│                     SNOW FAMILY COMPARISON                         │
+├─────────────────┬───────────────┬──────────────────────────────────┤
+│ Device          │ Storage       │ Use Cases                        │
+├─────────────────┼───────────────┼──────────────────────────────────┤
+│ Snowcone        │ 8TB HDD,      │ Small edge locations, IoT        │
+│                 │ 14TB NVMe     │ Remote/disconnected environments │
+│                 │               │ Battery-powered, 4.5 lbs        │
+├─────────────────┼───────────────┼──────────────────────────────────┤
+│ Snowball Edge   │ 80TB (storage)│ Data migration, edge compute     │
+│ Storage         │               │ S3-compatible, NFS               │
+├─────────────────┼───────────────┼──────────────────────────────────┤
+│ Snowball Edge   │ 40TB usable   │ Edge ML inference, preprocessing │
+│ Compute         │               │ GPU option available             │
+├─────────────────┼───────────────┼──────────────────────────────────┤
+│ Snowmobile      │ 100 PB        │ Exabyte-scale migration          │
+│                 │               │ Literal shipping container truck │
+└─────────────────┴───────────────┴──────────────────────────────────┘
+
+Rule of thumb: If transfer > 1 week → consider Snow Family
+  1Gbps internet: 1TB = 2.3 hours, 1PB = 100 days → use Snowball
+```
+
+```bash
+# Order a Snowball job (via console or CLI)
+aws snowball create-job \
+  --job-type IMPORT \
+  --resources '{
+    "S3Resources": [{
+      "BucketArn": "arn:aws:s3:::destination-bucket",
+      "KeyRange": {}
+    }]
+  }' \
+  --description "Data center migration batch 1" \
+  --address-id address-id-from-console \
+  --kms-key-arn arn:aws:kms:us-east-1:123:key/abc \
+  --role-arn arn:aws:iam::123:role/SnowballRole \
+  --snowball-type EDGE_STORAGE_OPTIMIZED \
+  --shipping-option STANDARD
+
+# Track job status
+aws snowball describe-job --job-id JID-xxxx
+
+# List all jobs
+aws snowball list-jobs \
+  --query "JobListEntries[*].[JobId,JobState,JobType,Description]" \
+  --output table
+```
+
+---
+
+## 4.16 Storage Gateway
+
+AWS Storage Gateway connects on-premises applications to AWS storage services.
+
+```
+Gateway Types:
+┌────────────────┬──────────────────────────────────────────────────┐
+│ Type           │ Description                                      │
+├────────────────┼──────────────────────────────────────────────────┤
+│ S3 File        │ NFS/SMB interface → objects stored in S3         │
+│ Gateway        │ Use for: file shares, backup targets             │
+├────────────────┼──────────────────────────────────────────────────┤
+│ FSx File       │ SMB interface → stored in FSx for Windows        │
+│ Gateway        │ Use for: Windows file shares to cloud            │
+├────────────────┼──────────────────────────────────────────────────┤
+│ Volume         │ iSCSI block volumes → S3 with EBS snapshots      │
+│ Gateway        │ Cached: data in S3, frequently accessed on-prem  │
+│                │ Stored: all data on-prem, async backup to S3     │
+├────────────────┼──────────────────────────────────────────────────┤
+│ Tape           │ Virtual tape library → S3 and Glacier            │
+│ Gateway        │ Use for: backup software using tape APIs         │
+└────────────────┴──────────────────────────────────────────────────┘
+
+Deployment options:
+  - Virtual appliance (VMware ESXi, Hyper-V, KVM)
+  - Hardware appliance (physical device)
+  - EC2 instance (for testing)
+```
+
+---
+
+## 4.17 Storage Comparison Summary
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                 AWS STORAGE SERVICES COMPARISON                  │
+├──────────────┬────────────┬─────────────────────────────────────┤
+│ Service      │ Type       │ Best For                            │
+├──────────────┼────────────┼─────────────────────────────────────┤
+│ S3           │ Object     │ Any unstructured data, backups,     │
+│              │            │ static files, data lake, media      │
+├──────────────┼────────────┼─────────────────────────────────────┤
+│ EBS gp3      │ Block      │ EC2 OS disk, databases, apps        │
+│ EBS io2      │ Block      │ High-perf databases (OLTP)          │
+├──────────────┼────────────┼─────────────────────────────────────┤
+│ EFS          │ File (NFS) │ Shared Linux content, CMS, DevTools │
+│ FSx Windows  │ File (SMB) │ Windows shared drives, AD-joined    │
+│ FSx Lustre   │ File (HPC) │ ML training, financial analytics    │
+├──────────────┼────────────┼─────────────────────────────────────┤
+│ Glacier      │ Archive    │ Long-term archival, compliance      │
+├──────────────┼────────────┼─────────────────────────────────────┤
+│ Snow Family  │ Physical   │ Large-scale data transfer           │
+├──────────────┼────────────┼─────────────────────────────────────┤
+│ Storage GW   │ Hybrid     │ Connect on-prem apps to cloud       │
+└──────────────┴────────────┴─────────────────────────────────────┘
+```
+
+---
+
+## 4.18 Interview Q&A
+
+**Q: What is S3 durability and availability?**
+A: S3 Standard provides 99.999999999% (11 nines) durability — meaning if you store 10 million objects, you can expect to lose one object every 10,000 years. This is achieved by storing objects across at least 3 AZs. Availability is 99.99% — meaning S3 may be unavailable for about 52 minutes per year.
+
+**Q: What is the difference between S3 Standard-IA and S3 One Zone-IA?**
+A: Both are for infrequently accessed data with the same 11 nines durability. One Zone-IA stores data in only one AZ (cheaper — saves 20%) but if that AZ is destroyed, data is lost. Standard-IA stores across 3+ AZs. Use One Zone-IA only for non-critical, reproducible data.
+
+**Q: When would you use S3 Intelligent-Tiering?**
+A: When access patterns are unpredictable or change over time. Intelligent-Tiering monitors object access and automatically moves objects to the most cost-effective tier. There is a small monthly monitoring fee per object, so it makes most sense for objects larger than 128KB that will exist for at least 30 days.
+
+**Q: How does S3 versioning help protect against accidental deletion?**
+A: With versioning enabled, deleting an object adds a "delete marker" instead of removing the object. All previous versions are preserved. To permanently delete, you must delete the specific version. This protects against accidental deletion and overwrites, and enables easy recovery of previous file versions.
+
+**Q: What is the difference between EBS and EFS?**
+A: EBS is block storage attached to a single EC2 instance in a specific AZ — like a hard drive. EFS is a network file system (NFS) accessible from multiple EC2 instances simultaneously across multiple AZs — like a shared network drive. EBS is lower latency and higher performance; EFS is more flexible for shared access. EFS is significantly more expensive per GB.
 
 **Q: What is S3 Transfer Acceleration?**
-> It routes uploads through AWS CloudFront edge locations, which use optimised AWS backbone network to reach the S3 bucket — faster than the public internet for users far from the bucket's region. Useful for global file uploads. Adds ~0.04 cents/GB.
+A: S3 Transfer Acceleration enables fast uploads to S3 from all over the world by routing data through CloudFront's edge locations using optimized network paths. It's most useful when uploading large files from locations far from the S3 bucket's region. It costs extra — about $0.04–$0.08 per GB.
+
+**Q: What is multipart upload in S3?**
+A: Multipart upload allows uploading large objects in parts (5MB to 5GB each) in parallel, then S3 assembles them. Benefits: faster uploads (parallel), resume interrupted uploads, required for objects over 5GB. AWS CLI automatically uses multipart upload for objects over 8MB. Always configure lifecycle rule to abort incomplete multipart uploads after N days to avoid orphaned storage charges.
+
+**Q: What is the difference between S3 pre-signed URLs and signed cookies?**
+A: Pre-signed URLs grant temporary access to a specific S3 object — useful for allowing users to download/upload without exposing bucket credentials. Signed cookies (a CloudFront feature) grant access to multiple objects via a wildcard pattern — useful when a user should have access to many files in a private CloudFront distribution.

@@ -1,923 +1,465 @@
-# Part II: AWS CDK (Cloud Development Kit)
-## Complete Detailed Guide for Beginners
+# Part 2: AWS CDK — Infrastructure as Code with Python
 
 ---
 
-# Chapter 10: Introduction to AWS CDK
+## 4.1 Introduction to AWS CDK
 
-## 10.1 What is Infrastructure as Code (IaC)?
+AWS CDK (Cloud Development Kit) lets you define cloud infrastructure using real programming languages — Python, TypeScript, Java, Go. CDK synthesizes to CloudFormation templates, giving you the power of a programming language with CloudFormation's reliability.
 
-### The Problem with Manual Setup
-
-Imagine setting up a website. You'd need to:
-1. Create a server
-2. Configure the network
-3. Set up a database
-4. Configure security
-5. Set up backups
-6. And much more...
-
-**Traditional approach:** Click through AWS Console (web interface)
-- Slow
-- Error-prone
-- Hard to replicate
-- No version control
-
-### The Solution: Infrastructure as Code
-
-Write code that describes what you want, and let the computer set it up.
-
-```
-Traditional:
-Developer → Clicks in AWS Console → Resources Created
-(Manual, slow, error-prone)
-
-Infrastructure as Code:
-Developer → Writes Code → Runs Command → Resources Created
-(Automated, fast, consistent, version-controlled)
-```
-
-### Benefits of IaC
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    INFRASTRUCTURE AS CODE                   │
-├─────────────────────────────────────────────────────────────┤
-│                                                             │
-│  ✅ Version Control  - Track changes like regular code     │
-│                                                             │
-│  ✅ Reproducibility  - Same code = Same infrastructure     │
-│                                                             │
-│  ✅ Automation       - Deploy with one command             │
-│                                                             │
-│  ✅ Documentation    - Code IS the documentation           │
-│                                                             │
-│  ✅ Testing          - Test infrastructure before deploying│
-│                                                             │
-│  ✅ Collaboration    - Teams can work on same codebase     │
-│                                                             │
-└─────────────────────────────────────────────────────────────┘
-```
+**CDK vs CloudFormation vs Terraform**:
+| Feature | CDK | CloudFormation | Terraform |
+|---------|-----|----------------|-----------|
+| Language | Python/TS/Java/Go | YAML/JSON | HCL |
+| Abstraction | High-level constructs | Low-level resources | Mid-level |
+| Testing | pytest/jest | cfn-guard | terratest |
+| State | CloudFormation stacks | CloudFormation stacks | terraform.tfstate |
+| Multi-cloud | AWS only | AWS only | Yes |
+| Learning curve | Medium | Medium | Medium |
 
 ---
 
-## 10.2 CDK vs CloudFormation vs Terraform
-
-### Comparison Table
-
-| Feature | AWS CDK | CloudFormation | Terraform |
-|---------|---------|----------------|-----------|
-| Language | Python, TypeScript, Java, C# | YAML/JSON | HCL (Terraform Language) |
-| Learning Curve | Medium | High | Medium |
-| Cloud Support | AWS only | AWS only | Multi-cloud |
-| Abstraction Level | High | Low | Medium |
-| Reusability | Excellent (constructs) | Limited | Good (modules) |
-| Testing | Native | Limited | Good |
-
-### Code Comparison - Creating an S3 Bucket
-
-**CloudFormation (YAML):**
-```yaml
-Resources:
-  MyBucket:
-    Type: AWS::S3::Bucket
-    Properties:
-      BucketName: my-bucket
-      VersioningConfiguration:
-        Status: Enabled
-      BucketEncryption:
-        ServerSideEncryptionConfiguration:
-          - ServerSideEncryptionByDefault:
-              SSEAlgorithm: AES256
-```
-
-**Terraform (HCL):**
-```hcl
-resource "aws_s3_bucket" "my_bucket" {
-  bucket = "my-bucket"
-}
-
-resource "aws_s3_bucket_versioning" "versioning" {
-  bucket = aws_s3_bucket.my_bucket.id
-  versioning_configuration {
-    status = "Enabled"
-  }
-}
-```
-
-**AWS CDK (Python):**
-```python
-from aws_cdk import aws_s3 as s3
-
-bucket = s3.Bucket(
-    self, "MyBucket",
-    versioned=True,
-    encryption=s3.BucketEncryption.S3_MANAGED
-)
-```
-
-**Winner:** CDK requires the least code and is most readable!
-
-### When to Use Each
-
-```
-Choose CDK when:
-- You know Python, TypeScript, or Java
-- You're building on AWS only
-- You want high-level abstractions
-- You want to reuse code with constructs
-
-Choose Terraform when:
-- You need multi-cloud support
-- Your team already knows HCL
-- You need provider flexibility
-
-Choose CloudFormation when:
-- You need direct AWS support
-- You prefer declarative YAML/JSON
-- You're already using it
-```
-
----
-
-## 10.3 CDK Concepts: Apps, Stacks, Constructs
-
-### The CDK Hierarchy
-
-```
-┌─────────────────────────────────────────────────┐
-│                      APP                         │
-│  (Your entire CDK application)                  │
-│                                                  │
-│    ┌─────────────────┐    ┌─────────────────┐   │
-│    │     STACK 1     │    │     STACK 2     │   │
-│    │ (Deployment unit)│    │ (Deployment unit)│   │
-│    │                  │    │                  │   │
-│    │  ┌───────────┐  │    │  ┌───────────┐  │   │
-│    │  │ Construct │  │    │  │ Construct │  │   │
-│    │  │ (Lambda)  │  │    │  │ (DynamoDB)│  │   │
-│    │  └───────────┘  │    │  └───────────┘  │   │
-│    │                  │    │                  │   │
-│    │  ┌───────────┐  │    │  ┌───────────┐  │   │
-│    │  │ Construct │  │    │  │ Construct │  │   │
-│    │  │ (API GW)  │  │    │  │ (S3)      │  │   │
-│    │  └───────────┘  │    │  └───────────┘  │   │
-│    └─────────────────┘    └─────────────────┘   │
-│                                                  │
-└─────────────────────────────────────────────────┘
-```
-
-### Understanding Each Component
-
-**1. App (Application)**
-```python
-# The root of your CDK application
-# Contains one or more stacks
-
-from aws_cdk import App
-
-app = App()
-
-# Add stacks to the app
-WebStack(app, "WebStack")
-DatabaseStack(app, "DatabaseStack")
-
-app.synth()  # Generate CloudFormation
-```
-
-**2. Stack**
-```python
-# A deployment unit - resources that deploy together
-# Maps to a CloudFormation stack
-
-from aws_cdk import Stack
-from constructs import Construct
-
-class MyStack(Stack):
-    def __init__(self, scope: Construct, id: str, **kwargs):
-        super().__init__(scope, id, **kwargs)
-        
-        # Add resources here
-        # Everything in this class deploys together
-```
-
-**3. Construct**
-```python
-# A cloud component (Lambda, S3, DynamoDB, etc.)
-# The building blocks of your infrastructure
-
-from aws_cdk import aws_s3 as s3
-
-# This is a construct
-bucket = s3.Bucket(self, "MyBucket")
-```
-
-### Real-World Analogy
-
-```
-App = A House
-├── Stack 1 = Kitchen
-│   ├── Construct = Refrigerator
-│   ├── Construct = Stove
-│   └── Construct = Sink
-│
-└── Stack 2 = Bedroom
-    ├── Construct = Bed
-    ├── Construct = Closet
-    └── Construct = Lamp
-```
-
----
-
-## 10.4 Installation and Prerequisites
-
-### Step 1: Prerequisites
+## 4.2 CDK Setup
 
 ```bash
-# You need:
-# 1. Node.js (for CDK CLI)
-node --version  # Should be 14.x or higher
-
-# 2. Python 3.7+ (for Python CDK)
-python --version
-
-# 3. AWS CLI configured
-aws --version
-aws configure  # Enter your AWS credentials
-```
-
-### Step 2: Install CDK CLI
-
-```bash
-# Install globally with npm
+# Install CDK CLI
 npm install -g aws-cdk
 
 # Verify installation
 cdk --version
-```
 
-### Step 3: Create a New CDK Project
+# Bootstrap your AWS account (one-time per account/region)
+cdk bootstrap aws://123456789012/us-east-1
 
-```bash
-# Create project directory
-mkdir my-cdk-project
-cd my-cdk-project
+# Create new Python CDK project
+mkdir my-infra && cd my-infra
+cdk init app --language=python
 
-# Initialize Python CDK project
-cdk init app --language python
-
-# This creates:
-# ├── app.py              # Entry point
-# ├── cdk.json            # CDK config
-# ├── my_cdk_project/     # Your stack code
-# │   ├── __init__.py
-# │   └── my_cdk_project_stack.py
-# ├── requirements.txt
-# └── tests/              # Test files
-```
-
-### Step 4: Set Up Python Environment
-
-```bash
-# Create virtual environment
-python -m venv .venv
-
-# Activate it
-# Windows:
-.venv\Scripts\activate
-# Mac/Linux:
+# Install Python dependencies
 source .venv/bin/activate
-
-# Install dependencies
+pip install aws-cdk-lib constructs
 pip install -r requirements.txt
 ```
 
-### Step 5: Bootstrap Your AWS Account
+### CDK Project Structure
 
-```bash
-# First-time setup for CDK in your AWS account
-# This creates an S3 bucket for CDK assets
-cdk bootstrap aws://ACCOUNT_ID/REGION
-
-# Example:
-cdk bootstrap aws://123456789012/us-east-1
+```
+my-infra/
+├── app.py                    # CDK app entry point
+├── my_infra/
+│   ├── __init__.py
+│   ├── network_stack.py      # VPC, subnets, SGs
+│   ├── data_stack.py         # Databases
+│   ├── app_stack.py          # ECS, Lambda
+│   └── pipeline_stack.py    # CI/CD pipeline
+├── tests/
+│   ├── __init__.py
+│   └── unit/
+│       └── test_network_stack.py
+├── cdk.json
+└── requirements.txt
 ```
 
 ---
 
-## 10.5 CDK CLI Commands
+## 4.3 Core CDK Concepts
 
-### Essential Commands
+```python
+# app.py — CDK app entry point
+import aws_cdk as cdk
+from my_infra.network_stack import NetworkStack
+from my_infra.data_stack import DataStack
+from my_infra.app_stack import AppStack
+
+app = cdk.App()
+
+# Environment definition
+prod_env = cdk.Environment(account="123456789012", region="us-east-1")
+dev_env = cdk.Environment(account="987654321098", region="us-east-1")
+
+# Create stacks
+network = NetworkStack(app, "ProdNetwork",
+    env=prod_env,
+    environment="prod",
+)
+
+data = DataStack(app, "ProdData",
+    env=prod_env,
+    environment="prod",
+    vpc=network.vpc,
+)
+
+application = AppStack(app, "ProdApp",
+    env=prod_env,
+    environment="prod",
+    vpc=network.vpc,
+    aurora_cluster=data.aurora_cluster,
+    image_tag="v1.2.3",
+)
+
+# Tag everything
+cdk.Tags.of(app).add("ManagedBy", "CDK")
+cdk.Tags.of(app).add("Environment", "prod")
+
+app.synth()
+```
+
+---
+
+## 4.4 VPC Stack
+
+```python
+# my_infra/network_stack.py
+import aws_cdk as cdk
+from aws_cdk import (
+    aws_ec2 as ec2,
+    aws_logs as logs,
+    aws_iam as iam,
+)
+from constructs import Construct
+
+
+class NetworkStack(cdk.Stack):
+    
+    def __init__(
+        self,
+        scope: Construct,
+        construct_id: str,
+        environment: str,
+        **kwargs,
+    ) -> None:
+        super().__init__(scope, construct_id, **kwargs)
+        
+        # ── VPC ──────────────────────────────────────────
+        self.vpc = ec2.Vpc(
+            self, "VPC",
+            vpc_name=f"myapp-{environment}",
+            ip_addresses=ec2.IpAddresses.cidr("10.0.0.0/16"),
+            max_azs=3,
+            nat_gateways=3 if environment == "prod" else 1,
+            subnet_configuration=[
+                ec2.SubnetConfiguration(
+                    name="Public",
+                    subnet_type=ec2.SubnetType.PUBLIC,
+                    cidr_mask=24,
+                    map_public_ip_on_launch=False,
+                ),
+                ec2.SubnetConfiguration(
+                    name="Private",
+                    subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS,
+                    cidr_mask=24,
+                ),
+                ec2.SubnetConfiguration(
+                    name="Isolated",
+                    subnet_type=ec2.SubnetType.PRIVATE_ISOLATED,
+                    cidr_mask=24,
+                ),
+            ],
+        )
+        
+        # ── VPC Endpoints ────────────────────────────────
+        # S3 Gateway Endpoint (free, no NAT needed for S3)
+        self.vpc.add_gateway_endpoint(
+            "S3Endpoint",
+            service=ec2.GatewayVpcEndpointAwsService.S3,
+        )
+        
+        # DynamoDB Gateway Endpoint
+        self.vpc.add_gateway_endpoint(
+            "DynamoDBEndpoint",
+            service=ec2.GatewayVpcEndpointAwsService.DYNAMODB,
+        )
+        
+        # SSM Interface Endpoints (for Systems Manager in private subnets)
+        for service_name in ["ssm", "ec2messages", "ssmmessages"]:
+            self.vpc.add_interface_endpoint(
+                f"{service_name.upper()}Endpoint",
+                service=ec2.InterfaceVpcEndpointAwsService(
+                    f"com.amazonaws.{self.region}.{service_name}"
+                ),
+                private_dns_enabled=True,
+                subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
+            )
+        
+        # ── VPC Flow Logs ────────────────────────────────
+        flow_log_group = logs.LogGroup(
+            self, "FlowLogGroup",
+            log_group_name=f"/aws/vpc/{environment}/flow-logs",
+            retention=logs.RetentionDays.ONE_MONTH,
+            removal_policy=cdk.RemovalPolicy.DESTROY,
+        )
+        
+        flow_log_role = iam.Role(
+            self, "FlowLogRole",
+            assumed_by=iam.ServicePrincipal("vpc-flow-logs.amazonaws.com"),
+        )
+        flow_log_group.grant_write(flow_log_role)
+        
+        ec2.FlowLog(
+            self, "FlowLog",
+            resource_type=ec2.FlowLogResourceType.from_vpc(self.vpc),
+            destination=ec2.FlowLogDestination.to_cloud_watch_logs(
+                flow_log_group, flow_log_role
+            ),
+            traffic_type=ec2.FlowLogTrafficType.REJECT,   # Only log rejected traffic
+        )
+        
+        # ── Outputs ──────────────────────────────────────
+        cdk.CfnOutput(self, "VpcId", value=self.vpc.vpc_id)
+        cdk.CfnOutput(
+            self, "PrivateSubnetIds",
+            value=",".join([s.subnet_id for s in self.vpc.private_subnets]),
+        )
+```
+
+---
+
+## 4.5 ECS Fargate Stack
+
+```python
+# my_infra/app_stack.py
+import aws_cdk as cdk
+from aws_cdk import (
+    aws_ec2 as ec2,
+    aws_ecs as ecs,
+    aws_ecs_patterns as ecs_patterns,
+    aws_elasticloadbalancingv2 as elbv2,
+    aws_iam as iam,
+    aws_logs as logs,
+    aws_rds as rds,
+    aws_certificatemanager as acm,
+    aws_route53 as route53,
+    aws_route53_targets as targets,
+    aws_autoscaling as autoscaling,
+)
+from constructs import Construct
+
+
+class AppStack(cdk.Stack):
+    
+    def __init__(
+        self,
+        scope: Construct,
+        construct_id: str,
+        environment: str,
+        vpc: ec2.Vpc,
+        aurora_cluster: rds.DatabaseCluster,
+        image_tag: str = "latest",
+        **kwargs,
+    ) -> None:
+        super().__init__(scope, construct_id, **kwargs)
+        
+        # ── ECS Cluster ──────────────────────────────────
+        cluster = ecs.Cluster(
+            self, "Cluster",
+            vpc=vpc,
+            cluster_name=f"myapp-{environment}",
+            container_insights=True,
+            enable_fargate_capacity_providers=True,
+        )
+        
+        # ── Task Role ────────────────────────────────────
+        task_role = iam.Role(
+            self, "TaskRole",
+            assumed_by=iam.ServicePrincipal("ecs-tasks.amazonaws.com"),
+        )
+        
+        # Allow reading from Secrets Manager
+        task_role.add_to_policy(iam.PolicyStatement(
+            actions=["secretsmanager:GetSecretValue"],
+            resources=[aurora_cluster.secret.secret_arn],
+        ))
+        
+        # ── Task Definition ──────────────────────────────
+        log_group = logs.LogGroup(
+            self, "LogGroup",
+            log_group_name=f"/ecs/myapp/{environment}",
+            retention=logs.RetentionDays.ONE_MONTH,
+            removal_policy=cdk.RemovalPolicy.DESTROY,
+        )
+        
+        task_definition = ecs.FargateTaskDefinition(
+            self, "TaskDef",
+            cpu=512,
+            memory_limit_mib=1024,
+            task_role=task_role,
+            runtime_platform=ecs.RuntimePlatform(
+                operating_system_family=ecs.OperatingSystemFamily.LINUX,
+                cpu_architecture=ecs.CpuArchitecture.ARM64,   # Graviton — cheaper
+            ),
+        )
+        
+        container = task_definition.add_container(
+            "app",
+            image=ecs.ContainerImage.from_registry(
+                f"{self.account}.dkr.ecr.{self.region}.amazonaws.com/myapp:{image_tag}"
+            ),
+            logging=ecs.LogDrivers.aws_logs(
+                log_group=log_group,
+                stream_prefix="app",
+            ),
+            environment={
+                "ENVIRONMENT": environment,
+                "AWS_REGION": self.region,
+            },
+            secrets={
+                "DATABASE_URL": ecs.Secret.from_secrets_manager(
+                    aurora_cluster.secret, field="database_url"
+                ),
+            },
+            health_check=ecs.HealthCheck(
+                command=["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"],
+                interval=cdk.Duration.seconds(30),
+                timeout=cdk.Duration.seconds(5),
+                retries=3,
+                start_period=cdk.Duration.seconds(60),
+            ),
+            readonly_root_filesystem=True,
+        )
+        container.add_port_mappings(ecs.PortMapping(container_port=8000))
+        
+        # ── ALB Fargate Service ──────────────────────────
+        # Use the L3 pattern construct for simplicity
+        self.fargate_service = ecs_patterns.ApplicationLoadBalancedFargateService(
+            self, "Service",
+            cluster=cluster,
+            task_definition=task_definition,
+            desired_count=2,
+            public_load_balancer=True,
+            listener_port=443,
+            redirect_http=True,
+            assign_public_ip=False,
+            task_subnets=ec2.SubnetSelection(
+                subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
+            ),
+            circuit_breaker=ecs.DeploymentCircuitBreaker(rollback=True),
+        )
+        
+        # ── Auto Scaling ─────────────────────────────────
+        scalable_target = self.fargate_service.service.auto_scale_task_count(
+            min_capacity=2,
+            max_capacity=20,
+        )
+        
+        # CPU-based scaling
+        scalable_target.scale_on_cpu_utilization(
+            "CpuScaling",
+            target_utilization_percent=70,
+            scale_in_cooldown=cdk.Duration.seconds(300),
+            scale_out_cooldown=cdk.Duration.seconds(60),
+        )
+        
+        # Request-count-based scaling
+        scalable_target.scale_on_request_count(
+            "RequestScaling",
+            requests_per_target=1000,
+            target_group=self.fargate_service.target_group,
+            scale_in_cooldown=cdk.Duration.seconds(300),
+            scale_out_cooldown=cdk.Duration.seconds(60),
+        )
+        
+        # ── DB Security Group Access ──────────────────────
+        aurora_cluster.connections.allow_from(
+            self.fargate_service.service,
+            ec2.Port.tcp(5432),
+            description="Allow ECS tasks to access Aurora",
+        )
+        
+        # ── Outputs ──────────────────────────────────────
+        cdk.CfnOutput(
+            self, "ServiceURL",
+            value=f"https://{self.fargate_service.load_balancer.load_balancer_dns_name}",
+        )
+```
+
+---
+
+## 4.6 CDK Commands
 
 ```bash
-# See all available commands
-cdk --help
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# COMMON COMMANDS
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-# List all stacks in the app
-cdk list
-# Output: MyStack
-
-# Generate CloudFormation template (without deploying)
+# Synthesize CloudFormation templates
 cdk synth
-# Creates: cdk.out/MyStack.template.json
 
-# Compare deployed stack with current code
-cdk diff
-# Shows what will change
-
-# Deploy the stack to AWS
-cdk deploy
-# Actually creates/updates resources in AWS
+# View diff before deploying
+cdk diff ProdApp
 
 # Deploy specific stack
-cdk deploy MyStack
+cdk deploy ProdNetwork ProdData ProdApp --require-approval never
 
 # Deploy all stacks
 cdk deploy --all
 
-# Delete the stack from AWS
-cdk destroy
+# Destroy stacks (careful!)
+cdk destroy ProdApp
 
-# Open AWS CloudFormation console
-cdk console
-```
+# List all stacks
+cdk ls
 
-### Command Flow Diagram
+# Check for security-sensitive changes
+cdk diff --security-only
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                       CDK WORKFLOW                          │
-├─────────────────────────────────────────────────────────────┤
-│                                                             │
-│   cdk synth                                                 │
-│       │                                                     │
-│       ▼                                                     │
-│   ┌───────────────────┐                                     │
-│   │ Python/TypeScript │ → CloudFormation Template          │
-│   │      Code         │                                     │
-│   └───────────────────┘                                     │
-│                                                             │
-│   cdk diff                                                  │
-│       │                                                     │
-│       ▼                                                     │
-│   ┌───────────────────┐                                     │
-│   │ Compare with      │ → Shows changes                    │
-│   │ deployed stack    │                                     │
-│   └───────────────────┘                                     │
-│                                                             │
-│   cdk deploy                                                │
-│       │                                                     │
-│       ▼                                                     │
-│   ┌───────────────────┐                                     │
-│   │ CloudFormation    │ → AWS Resources Created            │
-│   │ deploys template  │                                     │
-│   └───────────────────┘                                     │
-│                                                             │
-└─────────────────────────────────────────────────────────────┘
+# Generate CloudFormation template without deploying
+cdk synth > template.yaml
 ```
 
 ---
 
-## 10.6 Your First CDK App
-
-### Step 1: Project Structure
-
-After `cdk init app --language python`:
-
-```
-my-first-cdk/
-├── app.py                          # Entry point
-├── cdk.json                        # CDK configuration
-├── my_first_cdk/
-│   ├── __init__.py
-│   └── my_first_cdk_stack.py       # Your stack definition
-├── tests/
-│   └── test_my_first_cdk.py
-└── requirements.txt
-```
-
-### Step 2: Understanding app.py
+## 4.7 CDK Testing
 
 ```python
-#!/usr/bin/env python3
-# app.py - The entry point for your CDK application
-
+# tests/unit/test_network_stack.py
 import aws_cdk as cdk
-from my_first_cdk.my_first_cdk_stack import MyFirstCdkStack
+from aws_cdk.assertions import Template, Match
+from my_infra.network_stack import NetworkStack
+import pytest
 
-# Create the app
-app = cdk.App()
 
-# Create stack(s)
-MyFirstCdkStack(app, "MyFirstCdkStack")
+@pytest.fixture
+def template():
+    app = cdk.App()
+    stack = NetworkStack(app, "TestNetwork", environment="test",
+                         env=cdk.Environment(account="123456789012", region="us-east-1"))
+    return Template.from_stack(stack)
 
-# Synthesize CloudFormation template
-app.synth()
-```
 
-### Step 3: Create Your First Stack
+def test_vpc_created(template):
+    template.resource_count_is("AWS::EC2::VPC", 1)
 
-```python
-# my_first_cdk/my_first_cdk_stack.py
 
-from aws_cdk import (
-    Stack,
-    aws_s3 as s3,
-    aws_lambda as _lambda,
-    Duration,
-    RemovalPolicy,
-)
-from constructs import Construct
+def test_vpc_has_dns_enabled(template):
+    template.has_resource_properties("AWS::EC2::VPC", {
+        "EnableDnsHostnames": True,
+        "EnableDnsSupport": True,
+    })
 
-class MyFirstCdkStack(Stack):
-    """
-    My first CDK stack - creates a simple S3 bucket
-    and a Lambda function.
-    """
-    
-    def __init__(self, scope: Construct, construct_id: str, **kwargs) -> None:
-        super().__init__(scope, construct_id, **kwargs)
-        
-        # Create an S3 bucket
-        bucket = s3.Bucket(
-            self, "MyFirstBucket",
-            versioned=True,                      # Enable versioning
-            removal_policy=RemovalPolicy.DESTROY, # Delete when stack is deleted
-            auto_delete_objects=True             # Empty bucket before deletion
-        )
-        
-        # Create a Lambda function
-        my_lambda = _lambda.Function(
-            self, "HelloHandler",
-            runtime=_lambda.Runtime.PYTHON_3_9,
-            code=_lambda.Code.from_inline("""
-def handler(event, context):
-    return {
-        'statusCode': 200,
-        'body': 'Hello from CDK!'
-    }
-            """),
-            handler="index.handler",
-            timeout=Duration.seconds(30)
-        )
-```
 
-### Step 4: Deploy Your Stack
+def test_nat_gateway_exists(template):
+    # Should have at least 1 NAT gateway
+    template.resource_count_is("AWS::EC2::NatGateway", Match.any_value())
 
-```bash
-# 1. See what will be created
-cdk diff
 
-# Output:
-# Stack MyFirstCdkStack
-# Resources
-# [+] AWS::S3::Bucket MyFirstBucket
-# [+] AWS::Lambda::Function HelloHandler
+def test_flow_logs_configured(template):
+    template.resource_count_is("AWS::EC2::FlowLog", 1)
+    template.has_resource_properties("AWS::EC2::FlowLog", {
+        "TrafficType": "REJECT",
+    })
 
-# 2. Deploy to AWS
-cdk deploy
 
-# You'll see:
-# ✅  MyFirstCdkStack
-# 
-# Outputs:
-# MyFirstCdkStack.BucketName = myfirstcdkstack-myfirstbucket-xxx
-
-# 3. Test your Lambda
-aws lambda invoke --function-name HelloHandler output.json
-cat output.json
-# {"statusCode": 200, "body": "Hello from CDK!"}
-```
-
-### Step 5: Clean Up
-
-```bash
-# Delete all resources
-cdk destroy
-
-# Confirm with 'y'
-# All AWS resources will be deleted
-```
-
-### Complete First App Example
-
-```python
-# A more complete example
-
-from aws_cdk import (
-    Stack,
-    aws_s3 as s3,
-    aws_lambda as _lambda,
-    aws_apigateway as apigw,
-    Duration,
-    CfnOutput,
-)
-from constructs import Construct
-
-class HelloWorldStack(Stack):
-    def __init__(self, scope: Construct, id: str, **kwargs):
-        super().__init__(scope, id, **kwargs)
-        
-        # Lambda function
-        hello_lambda = _lambda.Function(
-            self, "HelloFunction",
-            runtime=_lambda.Runtime.PYTHON_3_9,
-            handler="index.handler",
-            code=_lambda.Code.from_inline("""
-def handler(event, context):
-    name = event.get('queryStringParameters', {}).get('name', 'World')
-    return {
-        'statusCode': 200,
-        'headers': {'Content-Type': 'application/json'},
-        'body': f'{{"message": "Hello, {name}!"}}'
-    }
-            """)
-        )
-        
-        # API Gateway to expose the Lambda
-        api = apigw.LambdaRestApi(
-            self, "HelloApi",
-            handler=hello_lambda,
-            rest_api_name="Hello Service"
-        )
-        
-        # Output the API URL
-        CfnOutput(
-            self, "ApiUrl",
-            value=api.url,
-            description="API Gateway URL"
-        )
-```
-
-After deploying, you can access: `https://xxx.execute-api.region.amazonaws.com/prod/?name=Alice`
-
----
-
-# Chapter 11: CDK Fundamentals
-
-## 11.1 Constructs (L1, L2, L3)
-
-### What are Constructs?
-
-Constructs are the building blocks of CDK. They represent AWS resources and come in three levels:
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    CONSTRUCT LEVELS                          │
-├─────────────────────────────────────────────────────────────┤
-│                                                              │
-│   L3 (Patterns)     ← Highest Level - Complete solutions   │
-│   ┌────────────────────────────────────────┐                │
-│   │ LambdaRestApi = Lambda + API Gateway   │                │
-│   │ + Permissions + Logging all in one     │                │
-│   └────────────────────────────────────────┘                │
-│                                                              │
-│   L2 (High-Level)   ← Most Common - Sensible defaults      │
-│   ┌────────────────────────────────────────┐                │
-│   │ s3.Bucket(), lambda.Function()         │                │
-│   │ Easy to use, handles complexity        │                │
-│   └────────────────────────────────────────┘                │
-│                                                              │
-│   L1 (CFN)          ← Lowest Level - Raw CloudFormation    │
-│   ┌────────────────────────────────────────┐                │
-│   │ CfnBucket(), CfnFunction()             │                │
-│   │ Full control, no abstractions          │                │
-│   └────────────────────────────────────────┘                │
-│                                                              │
-└─────────────────────────────────────────────────────────────┘
-```
-
-### L1 Constructs (CFN Resources)
-
-Direct mapping to CloudFormation. Prefixed with `Cfn`.
-
-```python
-from aws_cdk import aws_s3 as s3
-
-# L1 - Full control, verbose
-bucket = s3.CfnBucket(
-    self, "MyBucket",
-    bucket_name="my-bucket",
-    versioning_configuration=s3.CfnBucket.VersioningConfigurationProperty(
-        status="Enabled"
-    )
-)
-```
-
-### L2 Constructs (Higher-Level)
-
-Easier to use with sensible defaults.
-
-```python
-from aws_cdk import aws_s3 as s3
-
-# L2 - Simple and clean
-bucket = s3.Bucket(
-    self, "MyBucket",
-    versioned=True  # That's it!
-)
-
-# L2 provides helper methods
-bucket.grant_read(my_lambda)  # Easy permissions!
-```
-
-### L3 Constructs (Patterns)
-
-Complete solutions combining multiple resources.
-
-```python
-from aws_cdk import aws_apigateway as apigw
-
-# L3 - Complete API with Lambda backend
-api = apigw.LambdaRestApi(
-    self, "MyApi",
-    handler=my_lambda
-)
-# This creates:
-# - API Gateway
-# - Lambda integration
-# - IAM permissions
-# - All wired together!
-```
-
-### When to Use Each Level
-
-```
-L3: Quick start, standard patterns
-    "I need a Lambda with API Gateway"
-
-L2: Most cases, good defaults with customization
-    "I need an S3 bucket with specific settings"
-
-L1: Maximum control, complex scenarios
-    "I need features not yet in L2"
+def test_s3_endpoint_exists(template):
+    template.has_resource_properties("AWS::EC2::VPCEndpoint", {
+        "ServiceName": Match.string_like_regexp(".*s3.*"),
+        "VpcEndpointType": "Gateway",
+    })
 ```
 
 ---
 
-## 11.2 Stacks and Environments
+## 4.8 Interview Q&A
 
-### What is a Stack?
+**Q: What are the three levels of CDK constructs?**
+A: **L1 (Cfn resources)**: Direct 1:1 mapping to CloudFormation resources (e.g., `ec2.CfnVpc`). Full control, verbose. Use when no L2/L3 exists. **L2 (Curated constructs)**: Higher-level abstractions with defaults and helper methods (e.g., `ec2.Vpc`, `ecs.FargateTaskDefinition`). Most common usage. They set secure defaults (encryption, least-privilege). **L3 (Patterns)**: Multi-resource constructs solving complete use cases (e.g., `ecs_patterns.ApplicationLoadBalancedFargateService` creates ALB + ECS + security groups + IAM all at once). Great for prototyping, less flexible for production customization.
 
-A stack is a unit of deployment. All resources in a stack are deployed and deleted together.
+**Q: What is CDK bootstrapping and why is it required?**
+A: Bootstrapping creates AWS resources CDK needs to operate: an S3 bucket (stores large CloudFormation templates and Lambda code assets), ECR repository (stores Docker images for Lambda/ECS deployments), IAM roles (allow CDK to perform deployments). Run `cdk bootstrap aws://ACCOUNT/REGION` once per account/region. For multi-account pipelines, you must bootstrap all target accounts and configure trust between the pipeline account and target accounts. Bootstrap resources are in a stack called `CDKToolkit`.
 
-```python
-from aws_cdk import Stack, App
-from constructs import Construct
-
-class NetworkStack(Stack):
-    """VPC and networking resources."""
-    def __init__(self, scope: Construct, id: str, **kwargs):
-        super().__init__(scope, id, **kwargs)
-        # Network resources
-
-class DatabaseStack(Stack):
-    """Database resources."""
-    def __init__(self, scope: Construct, id: str, **kwargs):
-        super().__init__(scope, id, **kwargs)
-        # Database resources
-
-class ApplicationStack(Stack):
-    """Application resources."""
-    def __init__(self, scope: Construct, id: str, **kwargs):
-        super().__init__(scope, id, **kwargs)
-        # Application resources
-
-# app.py
-app = App()
-NetworkStack(app, "Network")
-DatabaseStack(app, "Database")
-ApplicationStack(app, "Application")
-```
-
-### Environments
-
-Deploy to specific AWS accounts and regions.
-
-```python
-from aws_cdk import App, Environment
-
-app = App()
-
-# Environment for development
-dev_env = Environment(
-    account="111111111111",
-    region="us-east-1"
-)
-
-# Environment for production
-prod_env = Environment(
-    account="222222222222",
-    region="us-west-2"
-)
-
-# Deploy to dev
-MyStack(app, "DevStack", env=dev_env)
-
-# Deploy to prod
-MyStack(app, "ProdStack", env=prod_env)
-```
-
-### Deploying to Specific Environment
-
-```bash
-# Deploy dev stack
-cdk deploy DevStack
-
-# Deploy prod stack
-cdk deploy ProdStack
-
-# Deploy all
-cdk deploy --all
-```
-
----
-
-## 11.3 Assets
-
-### What are Assets?
-
-Assets are local files (code, data) that CDK uploads to AWS during deployment.
-
-```python
-from aws_cdk import aws_lambda as _lambda
-
-# Lambda code from local directory
-lambda_fn = _lambda.Function(
-    self, "MyFunction",
-    runtime=_lambda.Runtime.PYTHON_3_9,
-    handler="main.handler",
-    code=_lambda.Code.from_asset("./lambda")  # Local folder
-)
-
-# S3 asset deployment
-from aws_cdk import aws_s3_deployment as s3deploy
-
-s3deploy.BucketDeployment(
-    self, "DeployWebsite",
-    sources=[s3deploy.Source.asset("./website")],  # Local files
-    destination_bucket=my_bucket
-)
-```
-
-### Asset Flow
-
-```
-Local Files (./lambda/)
-        ↓
-    cdk deploy
-        ↓
-CDK zips and uploads to S3 (CDK Bootstrap bucket)
-        ↓
-Lambda references the S3 location
-        ↓
-Lambda deployed with your code
-```
-
----
-
-## 11.4 Context and Parameters
-
-### Context Values
-
-Configuration that can change between deployments.
-
-```python
-# cdk.json
-{
-  "context": {
-    "environment": "dev",
-    "bucket_name": "my-dev-bucket"
-  }
-}
-
-# In your stack
-environment = self.node.try_get_context("environment")
-bucket_name = self.node.try_get_context("bucket_name")
-
-# Command line override
-cdk deploy -c environment=prod -c bucket_name=my-prod-bucket
-```
-
-### Stack Parameters (CloudFormation Parameters)
-
-```python
-from aws_cdk import CfnParameter
-
-# Define parameter
-bucket_name_param = CfnParameter(
-    self, "BucketName",
-    type="String",
-    description="Name of the S3 bucket",
-    default="my-default-bucket"
-)
-
-# Use parameter
-bucket = s3.Bucket(
-    self, "MyBucket",
-    bucket_name=bucket_name_param.value_as_string
-)
-```
-
----
-
-## 11.5 Tokens and Lazy Values
-
-### What are Tokens?
-
-Tokens are placeholders for values that aren't known until deployment time.
-
-```python
-from aws_cdk import aws_s3 as s3
-
-bucket = s3.Bucket(self, "MyBucket")
-
-# bucket.bucket_name is a TOKEN, not the actual name yet!
-print(bucket.bucket_name)  
-# Output: ${Token[TOKEN.123]}
-
-# It gets resolved during deployment
-```
-
-### Why Tokens?
-
-```
-When CDK runs (your computer):
-  bucket.bucket_name = "${Token[123]}"
-  
-When CloudFormation deploys:
-  bucket.bucket_name = "my-actual-bucket-name-abc123"
-```
-
-### Using Tokens
-
-```python
-# Passing to other resources
-lambda_fn = _lambda.Function(
-    self, "MyFunction",
-    environment={
-        "BUCKET_NAME": bucket.bucket_name  # Token - resolved at deploy
-    }
-)
-
-# Tokens work automatically in CDK!
-```
-
----
-
-## 11.6 Cross-Stack References
-
-### Sharing Resources Between Stacks
-
-```python
-# Stack 1: Creates a VPC
-class NetworkStack(Stack):
-    def __init__(self, scope, id, **kwargs):
-        super().__init__(scope, id, **kwargs)
-        
-        # Create VPC
-        self.vpc = ec2.Vpc(self, "MyVpc", max_azs=2)
-        # ↑ self.vpc makes it accessible from outside
-
-# Stack 2: Uses the VPC from Stack 1
-class ApplicationStack(Stack):
-    def __init__(self, scope, id, vpc: ec2.Vpc, **kwargs):
-        super().__init__(scope, id, **kwargs)
-        #              ↑ Receives VPC as parameter
-        
-        # Use the VPC from NetworkStack
-        cluster = ecs.Cluster(self, "Cluster", vpc=vpc)
-
-# app.py
-app = App()
-
-network_stack = NetworkStack(app, "NetworkStack")
-
-# Pass VPC to ApplicationStack
-app_stack = ApplicationStack(
-    app, "AppStack",
-    vpc=network_stack.vpc  # Reference from other stack
-)
-
-# Make app_stack depend on network_stack
-app_stack.add_dependency(network_stack)
-```
-
-### How It Works
-
-```
-NetworkStack
-    ├── Creates VPC
-    └── Exports: VPC ID (stored in AWS)
-         ↓
-ApplicationStack
-    └── Imports: VPC ID (retrieved from AWS)
-```
-
----
-
-*Continue to Chapter 12-16 for more AWS CDK topics...*
+**Q: How do you share values between CDK stacks?**
+A: Three approaches: (1) **Direct references**: Pass constructs as constructor parameters (`AppStack(app, "App", vpc=network.vpc)`) — CDK handles the dependency and creates CloudFormation exports automatically. (2) **SSM Parameter Store**: Store values in SSM and read them cross-stack with `ssm.StringParameter.value_from_lookup()`. Works across stacks deployed at different times. (3) **CloudFormation exports**: Use `cdk.Fn.import_value()` — creates hard coupling (can't delete exporting stack while import exists). Direct references are preferred within the same CDK app; SSM for cross-app sharing.

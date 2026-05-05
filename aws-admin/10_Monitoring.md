@@ -1,419 +1,616 @@
-# Chapter 10: Monitoring & Observability
-## CloudWatch, CloudTrail, X-Ray & AWS Config
+# Chapter 10: Monitoring — CloudWatch, CloudTrail, X-Ray & AWS Config
+## Observability, Logging, Tracing, Auditing, and Compliance
 
 ---
 
 ## 10.1 Observability Overview
 
+The three pillars of observability:
+
 ```
-┌──────────────────────────────────────────────────────────┐
-│              THREE PILLARS OF OBSERVABILITY              │
-│                                                          │
-│  METRICS           LOGS             TRACES               │
-│  ───────           ────             ──────               │
-│  What happened     Why it happened  How it happened      │
-│  (numbers)         (text events)    (request path)       │
-│                                                          │
-│  CloudWatch        CloudWatch       X-Ray                 │
-│  Metrics           Logs             (distributed tracing) │
-│                                                          │
-│  e.g., CPU=80%,    e.g., "ERROR:   e.g., API call took  │
-│  500 errors/min    connection       300ms — 200ms in DB  │
-│                    refused"         + 100ms in Lambda    │
-└──────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                  OBSERVABILITY PILLARS                           │
+├────────────────────┬─────────────────────────────────────────────┤
+│ Metrics            │ Numerical measurements over time            │
+│                    │ AWS: CloudWatch Metrics                      │
+│                    │ e.g., CPUUtilization, RequestCount          │
+├────────────────────┼─────────────────────────────────────────────┤
+│ Logs               │ Timestamped text records of events          │
+│                    │ AWS: CloudWatch Logs                         │
+│                    │ e.g., application logs, access logs         │
+├────────────────────┼─────────────────────────────────────────────┤
+│ Traces             │ Request lifecycle across distributed systems │
+│                    │ AWS: X-Ray                                   │
+│                    │ e.g., API call → Lambda → DB duration       │
+└────────────────────┴─────────────────────────────────────────────┘
+
+AWS Monitoring Tools:
+  CloudWatch:    Metrics, alarms, dashboards, logs, anomaly detection
+  CloudTrail:    API call audit trail (who did what, when)
+  X-Ray:         Distributed tracing for applications
+  AWS Config:    Resource configuration history and compliance rules
+  GuardDuty:     Threat detection (see Chapter 11)
+  Security Hub:  Security posture aggregation (see Chapter 11)
 ```
 
 ---
 
 ## 10.2 CloudWatch Metrics
 
-Every AWS service automatically publishes metrics to CloudWatch. You can also publish custom metrics.
+### Key Concepts
 
-### Built-In Metrics
+```
+Namespace:   Container for related metrics (e.g., AWS/EC2, AWS/Lambda)
+Metric:      Named measurement (e.g., CPUUtilization)
+Dimension:   Name-value pair to filter metrics (e.g., InstanceId=i-0abc)
+Datapoint:   A single value at a specific time
+Statistics:  Average, Sum, Min, Max, SampleCount, p99, p95
+Period:      Granularity of data aggregation (60s, 300s, etc.)
+```
 
 ```bash
 # List metrics for EC2
 aws cloudwatch list-metrics \
   --namespace AWS/EC2 \
+  --metric-name CPUUtilization \
   --dimensions Name=InstanceId,Value=i-0abc123
 
-# Get CPU utilisation last 1 hour
+# Get metric statistics
 aws cloudwatch get-metric-statistics \
   --namespace AWS/EC2 \
   --metric-name CPUUtilization \
   --dimensions Name=InstanceId,Value=i-0abc123 \
-  --start-time $(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%SZ) \
-  --end-time $(date -u +%Y-%m-%dT%H:%M:%SZ) \
-  --period 300 \
-  --statistics Average,Maximum
+  --start-time 2025-01-15T00:00:00Z \
+  --end-time 2025-01-15T23:59:59Z \
+  --period 3600 \
+  --statistics Average Maximum
+
+# Get metric data (more flexible, handles multiple metrics)
+aws cloudwatch get-metric-data \
+  --metric-data-queries '[
+    {
+      "Id": "cpu",
+      "MetricStat": {
+        "Metric": {
+          "Namespace": "AWS/EC2",
+          "MetricName": "CPUUtilization",
+          "Dimensions": [{"Name": "InstanceId", "Value": "i-0abc123"}]
+        },
+        "Period": 300,
+        "Stat": "Average"
+      }
+    }
+  ]' \
+  --start-time 2025-01-15T00:00:00Z \
+  --end-time 2025-01-15T23:59:59Z
 ```
 
 ### Custom Metrics
 
+```bash
+# Publish custom metric from CLI
+aws cloudwatch put-metric-data \
+  --namespace "MyApp/Business" \
+  --metric-data '[
+    {
+      "MetricName": "OrdersPerMinute",
+      "Dimensions": [
+        {"Name": "Environment", "Value": "prod"},
+        {"Name": "Region", "Value": "us-east-1"}
+      ],
+      "Value": 42.0,
+      "Unit": "Count"
+    }
+  ]'
+```
+
 ```python
+# Publish custom metrics from application
 import boto3
+import time
+from datetime import datetime
 
-cloudwatch = boto3.client("cloudwatch", region_name="us-east-1")
+cloudwatch = boto3.client('cloudwatch')
 
-# Publish custom metric
-cloudwatch.put_metric_data(
-    Namespace="MyApp/API",
-    MetricData=[
-        {
-            "MetricName": "OrdersProcessed",
-            "Value": 42,
-            "Unit": "Count",
-            "Dimensions": [
-                {"Name": "Environment", "Value": "prod"},
-                {"Name": "Service", "Value": "orders"},
-            ]
-        },
-        {
-            "MetricName": "OrderProcessingTime",
-            "Value": 350.5,
-            "Unit": "Milliseconds",
-            "Dimensions": [
-                {"Name": "Environment", "Value": "prod"},
-            ]
-        }
-    ]
+class MetricsPublisher:
+    def __init__(self, namespace: str, dimensions: list):
+        self.namespace = namespace
+        self.dimensions = dimensions
+        self.buffer = []
+    
+    def record(self, name: str, value: float, unit: str = 'Count'):
+        self.buffer.append({
+            'MetricName': name,
+            'Dimensions': self.dimensions,
+            'Value': value,
+            'Unit': unit,
+            'Timestamp': datetime.utcnow()
+        })
+        
+        # Flush every 20 metrics (API limit per call)
+        if len(self.buffer) >= 20:
+            self.flush()
+    
+    def flush(self):
+        if not self.buffer:
+            return
+        cloudwatch.put_metric_data(
+            Namespace=self.namespace,
+            MetricData=self.buffer
+        )
+        self.buffer = []
+
+# Usage
+metrics = MetricsPublisher(
+    namespace="MyApp/Orders",
+    dimensions=[{"Name": "Environment", "Value": "prod"}]
 )
+
+def process_order(order):
+    start = time.time()
+    success = execute_order(order)
+    duration = (time.time() - start) * 1000  # ms
+    
+    metrics.record('OrderProcessingTime', duration, 'Milliseconds')
+    metrics.record('OrdersProcessed', 1, 'Count')
+    if not success:
+        metrics.record('OrderFailures', 1, 'Count')
 ```
 
 ---
 
 ## 10.3 CloudWatch Alarms
 
-Alarms watch metrics and trigger actions when thresholds are breached.
+### Simple Alarms
 
 ```bash
-# Alarm: CPU > 80% for 2 consecutive 5-minute periods
+# CPU alarm → SNS
 aws cloudwatch put-metric-alarm \
-  --alarm-name high-cpu-ec2 \
-  --alarm-description "EC2 CPU exceeds 80%" \
-  --namespace AWS/EC2 \
+  --alarm-name prod-ec2-high-cpu \
+  --alarm-description "EC2 CPU > 80% for 5 minutes" \
   --metric-name CPUUtilization \
-  --dimensions Name=InstanceId,Value=i-0abc123 \
+  --namespace AWS/EC2 \
+  --dimensions Name=AutoScalingGroupName,Value=prod-asg \
   --statistic Average \
   --period 300 \
-  --evaluation-periods 2 \
   --threshold 80 \
   --comparison-operator GreaterThanThreshold \
-  --alarm-actions arn:aws:sns:us-east-1:123456:ops-alerts \
-  --ok-actions arn:aws:sns:us-east-1:123456:ops-alerts \
-  --treat-missing-data breaching
+  --evaluation-periods 2 \            # 2 consecutive periods
+  --datapoints-to-alarm 2 \           # Both periods must breach
+  --treat-missing-data notBreaching \
+  --alarm-actions arn:aws:sns:us-east-1:123:ops-alerts \
+  --ok-actions arn:aws:sns:us-east-1:123:ops-alerts \
+  --insufficient-data-actions arn:aws:sns:us-east-1:123:ops-alerts
 
-# Alarm: 5xx errors > 10 in 1 minute (ALB)
+# Lambda error rate alarm
 aws cloudwatch put-metric-alarm \
-  --alarm-name high-5xx-errors \
-  --namespace AWS/ApplicationELB \
-  --metric-name HTTPCode_ELB_5XX_Count \
-  --dimensions Name=LoadBalancer,Value=app/my-alb/abc123 \
+  --alarm-name lambda-errors-high \
+  --metric-name Errors \
+  --namespace AWS/Lambda \
+  --dimensions Name=FunctionName,Value=order-processor \
   --statistic Sum \
   --period 60 \
-  --evaluation-periods 1 \
-  --threshold 10 \
-  --comparison-operator GreaterThanThreshold \
-  --alarm-actions arn:aws:sns:us-east-1:123456:ops-alerts
-
-# Alarm: Lambda error rate > 1%
-aws cloudwatch put-metric-alarm \
-  --alarm-name lambda-errors \
-  --namespace AWS/Lambda \
-  --metric-name Errors \
-  --dimensions Name=FunctionName,Value=my-function \
-  --statistic Sum \
-  --period 300 \
-  --evaluation-periods 1 \
   --threshold 5 \
   --comparison-operator GreaterThanThreshold \
-  --alarm-actions arn:aws:sns:us-east-1:123456:ops-alerts
+  --evaluation-periods 1 \
+  --alarm-actions arn:aws:sns:us-east-1:123:ops-alerts
 
-# Composite alarm — alert only if BOTH CPU and memory are high
+# ALB 5xx error rate alarm (using metric math)
+aws cloudwatch put-metric-alarm \
+  --alarm-name alb-5xx-rate-high \
+  --metrics '[
+    {
+      "Id": "errors",
+      "MetricStat": {
+        "Metric": {"Namespace": "AWS/ApplicationELB", "MetricName": "HTTPCode_Target_5XX_Count",
+          "Dimensions": [{"Name": "LoadBalancer", "Value": "app/my-alb/abc"}]},
+        "Period": 60, "Stat": "Sum"
+      }
+    },
+    {
+      "Id": "total",
+      "MetricStat": {
+        "Metric": {"Namespace": "AWS/ApplicationELB", "MetricName": "RequestCount",
+          "Dimensions": [{"Name": "LoadBalancer", "Value": "app/my-alb/abc"}]},
+        "Period": 60, "Stat": "Sum"
+      }
+    },
+    {
+      "Id": "error_rate",
+      "Expression": "errors/total*100",
+      "Label": "5xx Error Rate %"
+    }
+  ]' \
+  --comparison-operator GreaterThanThreshold \
+  --threshold 5 \
+  --evaluation-periods 3 \
+  --alarm-actions arn:aws:sns:us-east-1:123:ops-critical
+
+# Anomaly detection alarm (ML-based)
+aws cloudwatch put-metric-alarm \
+  --alarm-name request-count-anomaly \
+  --metrics '[
+    {
+      "Id": "requests",
+      "MetricStat": {
+        "Metric": {"Namespace": "AWS/ApplicationELB", "MetricName": "RequestCount",
+          "Dimensions": [{"Name": "LoadBalancer", "Value": "app/my-alb/abc"}]},
+        "Period": 300, "Stat": "Sum"
+      }
+    },
+    {
+      "Id": "anomaly_band",
+      "Expression": "ANOMALY_DETECTION_BAND(requests, 3)",
+      "Label": "Request Count (expected)"
+    }
+  ]' \
+  --comparison-operator GreaterThanUpperThreshold \
+  --threshold-metric-id anomaly_band \
+  --evaluation-periods 2 \
+  --alarm-actions arn:aws:sns:us-east-1:123:ops-alerts
+
+# Composite alarm (page only if BOTH CPU and memory are high)
 aws cloudwatch put-composite-alarm \
-  --alarm-name high-resource-usage \
-  --alarm-rule "ALARM(high-cpu-ec2) AND ALARM(high-memory-ec2)" \
-  --alarm-actions arn:aws:sns:us-east-1:123456:ops-alerts
+  --alarm-name prod-resource-critical \
+  --alarm-rule "ALARM(prod-ec2-high-cpu) AND ALARM(prod-ec2-high-memory)" \
+  --alarm-actions arn:aws:sns:us-east-1:123:pagerduty-critical
 ```
 
 ---
 
 ## 10.4 CloudWatch Logs
 
-CloudWatch Logs stores and searches log data from all AWS services and your applications.
-
 ```bash
 # Create log group with retention
-aws logs create-log-group --log-group-name /app/fastapi-prod
+aws logs create-log-group \
+  --log-group-name /app/prod/my-service \
+  --kms-key-id arn:aws:kms:us-east-1:123:key/abc \
+  --tags Environment=prod,Service=my-service
+
 aws logs put-retention-policy \
-  --log-group-name /app/fastapi-prod \
-  --retention-in-days 30
+  --log-group-name /app/prod/my-service \
+  --retention-in-days 90
 
-# View recent logs
-aws logs tail /app/fastapi-prod --follow
-aws logs tail /aws/lambda/my-function --follow --since 10m
-
-# Filter logs (search)
-aws logs filter-log-events \
-  --log-group-name /app/fastapi-prod \
+# Subscribe to CloudWatch Logs (stream logs to Lambda/Kinesis/Firehose)
+aws logs put-subscription-filter \
+  --log-group-name /app/prod/my-service \
+  --filter-name error-stream \
   --filter-pattern "ERROR" \
-  --start-time $(($(date +%s) - 3600))000  # Last 1 hour
+  --destination-arn arn:aws:lambda:us-east-1:123:function:log-processor
 
-# CloudWatch Insights — SQL-like log analytics
-aws logs start-query \
-  --log-group-name /app/fastapi-prod \
-  --start-time $(($(date +%s) - 3600)) \
-  --end-time $(date +%s) \
-  --query-string '
-    fields @timestamp, @message
-    | filter @message like /ERROR/
-    | stats count(*) as error_count by bin(5m)
-    | sort @timestamp desc
-    | limit 20
-  '
-```
-
-### Structured Logging in Python
-
-```python
-# logging_config.py
-import logging
-import json
-from datetime import datetime
-
-
-class JSONFormatter(logging.Formatter):
-    def format(self, record):
-        log_data = {
-            "timestamp": datetime.utcnow().isoformat() + "Z",
-            "level": record.levelname,
-            "message": record.getMessage(),
-            "logger": record.name,
-            "function": record.funcName,
-            "line": record.lineno,
-        }
-        if hasattr(record, "request_id"):
-            log_data["request_id"] = record.request_id
-        if record.exc_info:
-            log_data["exception"] = self.formatException(record.exc_info)
-        return json.dumps(log_data)
-
-
-def setup_logging():
-    handler = logging.StreamHandler()
-    handler.setFormatter(JSONFormatter())
-    
-    root = logging.getLogger()
-    root.setLevel(logging.INFO)
-    root.addHandler(handler)
-
-
-# FastAPI middleware for request logging
-import time
-from fastapi import Request
-
-async def logging_middleware(request: Request, call_next):
-    start = time.time()
-    request_id = request.headers.get("X-Request-ID", "unknown")
-    
-    logger = logging.getLogger("api")
-    logger.info("Request started", extra={
-        "request_id": request_id,
-        "method": request.method,
-        "path": request.url.path
-    })
-    
-    response = await call_next(request)
-    duration = (time.time() - start) * 1000
-    
-    logger.info("Request completed", extra={
-        "request_id": request_id,
-        "status_code": response.status_code,
-        "duration_ms": round(duration, 2)
-    })
-    return response
-```
-
-### Log Metric Filter — Alert on Errors in Logs
-
-```bash
-# Create metric filter (count ERROR lines as a metric)
+# Create metric filter (count errors from logs)
 aws logs put-metric-filter \
-  --log-group-name /app/fastapi-prod \
+  --log-group-name /app/prod/my-service \
   --filter-name error-count \
   --filter-pattern "[timestamp, level=ERROR, ...]" \
-  --metric-transformations \
-    metricName=ApplicationErrors,\
-    metricNamespace=MyApp/API,\
-    metricValue=1,\
-    defaultValue=0
+  --metric-transformations '[{
+    "metricName": "ApplicationErrors",
+    "metricNamespace": "MyApp/Logs",
+    "metricValue": "1",
+    "unit": "Count"
+  }]'
 
-# Then create CloudWatch alarm on that metric
-aws cloudwatch put-metric-alarm \
-  --alarm-name application-error-rate \
-  --namespace MyApp/API \
-  --metric-name ApplicationErrors \
-  --statistic Sum \
-  --period 300 \
-  --evaluation-periods 1 \
-  --threshold 10 \
-  --comparison-operator GreaterThanThreshold \
-  --alarm-actions arn:aws:sns:...:ops-alerts
+# Search logs with tail
+aws logs tail /app/prod/my-service \
+  --follow \              # Stream live
+  --filter-pattern "ERROR"
+
+# Query logs with CloudWatch Logs Insights
+aws logs start-query \
+  --log-group-names /app/prod/my-service \
+  --start-time $(date -d '1 hour ago' +%s) \
+  --end-time $(date +%s) \
+  --query-string 'fields @timestamp, @message
+    | filter @message like /ERROR/
+    | stats count() as error_count by bin(5m)
+    | sort @timestamp desc
+    | limit 100'
+
+# Get query results
+aws logs get-query-results --query-id <id-from-above>
+```
+
+### CloudWatch Logs Insights Query Examples
+
+```
+# Top 10 slowest API endpoints
+fields @timestamp, method, path, duration
+| filter duration > 1000
+| stats avg(duration) as avg_duration, count() as requests by path
+| sort avg_duration desc
+| limit 10
+
+# Error rate by Lambda function
+fields @timestamp, @logStream, @message
+| filter @message like "ERROR"
+| stats count() as errors by @logStream
+| sort errors desc
+
+# 4xx/5xx rate per hour
+fields @timestamp, status
+| filter status >= 400
+| stats count(*) as error_count by bin(1h), status
+| sort @timestamp desc
+
+# Lambda cold starts
+fields @requestId, @initDuration
+| filter @initDuration > 0
+| stats count() as cold_starts, avg(@initDuration) as avg_init by bin(1h)
+
+# P99 latency by endpoint  
+fields @timestamp, path, duration
+| filter ispresent(duration)
+| stats pct(duration, 99) as p99, pct(duration, 95) as p95, avg(duration) as avg by path
+| sort p99 desc
 ```
 
 ---
 
 ## 10.5 CloudWatch Dashboards
 
-```bash
-# Create dashboard (JSON body)
-aws cloudwatch put-dashboard \
-  --dashboard-name "MyApp-Production" \
-  --dashboard-body '{
+```python
+# Create dashboard via API
+import json
+
+dashboard_body = {
     "widgets": [
-      {
-        "type": "metric",
-        "properties": {
-          "title": "API Request Count",
-          "metrics": [["AWS/Lambda", "Invocations", "FunctionName", "my-function"]],
-          "period": 300,
-          "stat": "Sum",
-          "view": "timeSeries"
+        {
+            "type": "metric",
+            "x": 0, "y": 0,
+            "width": 12, "height": 6,
+            "properties": {
+                "title": "API Request Count & Latency",
+                "view": "timeSeries",
+                "metrics": [
+                    ["AWS/ApplicationELB", "RequestCount", "LoadBalancer", "app/prod-alb/abc"],
+                    ["AWS/ApplicationELB", "TargetResponseTime", "LoadBalancer", "app/prod-alb/abc", {"stat": "p99"}]
+                ],
+                "period": 60,
+                "yAxis": {"left": {"label": "Requests", "min": 0}},
+                "annotations": {
+                    "horizontal": [{"value": 1000, "label": "Capacity limit", "color": "#ff0000"}]
+                }
+            }
+        },
+        {
+            "type": "metric",
+            "x": 12, "y": 0,
+            "width": 12, "height": 6,
+            "properties": {
+                "title": "Error Rates",
+                "view": "timeSeries",
+                "metrics": [
+                    ["AWS/ApplicationELB", "HTTPCode_Target_4XX_Count", "LoadBalancer", "app/prod-alb/abc", {"stat": "Sum"}],
+                    ["AWS/ApplicationELB", "HTTPCode_Target_5XX_Count", "LoadBalancer", "app/prod-alb/abc", {"stat": "Sum", "color": "#ff0000"}]
+                ]
+            }
+        },
+        {
+            "type": "alarm",
+            "x": 0, "y": 6,
+            "width": 24, "height": 4,
+            "properties": {
+                "title": "Production Alarms",
+                "alarms": [
+                    "arn:aws:cloudwatch:us-east-1:123:alarm:prod-ec2-high-cpu",
+                    "arn:aws:cloudwatch:us-east-1:123:alarm:lambda-errors-high",
+                    "arn:aws:cloudwatch:us-east-1:123:alarm:alb-5xx-rate-high"
+                ]
+            }
         }
-      },
-      {
-        "type": "metric",
-        "properties": {
-          "title": "Lambda Errors",
-          "metrics": [["AWS/Lambda", "Errors", "FunctionName", "my-function"]],
-          "period": 300,
-          "stat": "Sum",
-          "view": "timeSeries"
-        }
-      },
-      {
-        "type": "alarm",
-        "properties": {
-          "title": "Alarms",
-          "alarms": [
-            "arn:aws:cloudwatch:us-east-1:123456:alarm:high-cpu-ec2",
-            "arn:aws:cloudwatch:us-east-1:123456:alarm:high-5xx-errors"
-          ]
-        }
-      }
     ]
-  }'
+}
+
+cloudwatch = boto3.client('cloudwatch')
+cloudwatch.put_dashboard(
+    DashboardName='prod-overview',
+    DashboardBody=json.dumps(dashboard_body)
+)
 ```
 
 ---
 
-## 10.6 CloudTrail — Audit Logging
+## 10.6 CloudTrail — API Audit Logging
 
-CloudTrail records every API call made in your AWS account — who did what, when, from where.
-
-```
-CloudTrail captures:
-• Console actions (user clicked "Delete" on EC2)
-• CLI commands (aws s3 rm ...)
-• SDK/API calls (boto3.client("s3").delete_object(...))
-• AWS service-to-service calls
-
-NOT captured:
-• Traffic within your EC2 instances
-• Application logs
-• Data events (S3 object reads) — optional, extra cost
-```
+CloudTrail records every API call made in your AWS account (who, what, when, from where).
 
 ```bash
-# Create trail (enables multi-region logging)
+# Create trail (multi-region, with log file validation)
 aws cloudtrail create-trail \
-  --name my-audit-trail \
+  --name prod-trail \
   --s3-bucket-name my-cloudtrail-logs \
   --is-multi-region-trail \
-  --enable-log-file-validation \
-  --cloud-watch-logs-log-group-arn arn:aws:logs:us-east-1:123456:log-group:cloudtrail \
-  --cloud-watch-logs-role-arn arn:aws:iam::123456:role/cloudtrail-cloudwatch-role
+  --enable-log-file-validation \  # Detect log tampering
+  --kms-key-id arn:aws:kms:us-east-1:123:key/abc \
+  --cloud-watch-logs-log-group-arn arn:aws:logs:us-east-1:123:log-group:CloudTrail \
+  --cloud-watch-logs-role-arn arn:aws:iam::123:role/CloudTrailCWLogsRole \
+  --include-global-service-events \  # Include IAM, STS, etc.
+  --tags Key=Purpose,Value=security-audit
 
-aws cloudtrail start-logging --name my-audit-trail
+# Enable trail
+aws cloudtrail start-logging --name prod-trail
 
-# Look up events (last 90 days kept in Event History for free)
+# Enable data events (S3 object-level, Lambda invocations — adds cost!)
+aws cloudtrail put-event-selectors \
+  --trail-name prod-trail \
+  --event-selectors '[
+    {
+      "ReadWriteType": "All",
+      "IncludeManagementEvents": true,
+      "DataResources": [
+        {
+          "Type": "AWS::S3::Object",
+          "Values": ["arn:aws:s3:::sensitive-bucket/"]
+        },
+        {
+          "Type": "AWS::Lambda::Function",
+          "Values": ["arn:aws:lambda:us-east-1:123:function:critical-function"]
+        }
+      ]
+    }
+  ]'
+
+# Validate log file integrity
+aws cloudtrail validate-logs \
+  --trail-arn arn:aws:cloudtrail:us-east-1:123:trail/prod-trail \
+  --start-time 2025-01-01T00:00:00Z \
+  --end-time 2025-01-15T23:59:59Z \
+  --verbose
+
+# Lookup events (last 90 days searchable without S3)
 aws cloudtrail lookup-events \
-  --lookup-attributes AttributeKey=EventName,AttributeValue=DeleteBucket \
-  --start-time 2024-01-01T00:00:00Z
+  --lookup-attributes \
+    AttributeKey=EventName,AttributeValue=DeleteBucket \
+  --start-time 2025-01-01T00:00:00Z \
+  --query "Events[*].[EventTime,Username,EventName,Resources]" \
+  --output table
 
-# Who deleted my EC2 instance?
+# Find who deleted something
 aws cloudtrail lookup-events \
-  --lookup-attributes AttributeKey=ResourceName,AttributeValue=i-0abc123 \
-  --query "Events[?EventName=='TerminateInstances'].[EventTime,Username,SourceIPAddress]"
+  --lookup-attributes \
+    AttributeKey=ResourceName,AttributeValue=my-critical-bucket \
+  --max-results 50
+
+# CloudTrail Lake — SQL queries on audit events (long retention, fast queries)
+# Create event data store
+aws cloudtrail create-event-data-store \
+  --name prod-audit-lake \
+  --advanced-event-selectors '[{
+    "Name": "All events",
+    "FieldSelectors": [{"Field": "eventCategory", "Equals": ["Management"]}]
+  }]' \
+  --multi-region-enabled \
+  --organization-enabled \
+  --retention-period 2555   # 7 years
+
+# Query Lake
+aws cloudtrail start-query \
+  --query-statement "SELECT eventName, userIdentity.arn, eventTime FROM prod-audit-lake
+    WHERE eventName = 'DeleteBucket'
+    AND eventTime > '2025-01-01 00:00:00'
+    ORDER BY eventTime DESC"
 ```
 
 ---
 
 ## 10.7 AWS X-Ray — Distributed Tracing
 
-X-Ray traces requests as they travel through your microservices, showing where time is spent.
+X-Ray helps you analyze and debug distributed applications by tracing requests through services.
 
 ```
-Request trace:
-API Gateway (5ms)
-  └── Lambda cold start (250ms)
-       └── Lambda handler (95ms)
-            ├── DynamoDB GetItem (15ms) ✅
-            ├── External API call (60ms) ⚠ SLOW
-            └── DynamoDB PutItem (20ms) ✅
-Total: 350ms → root cause found: external API call
+X-Ray Concepts:
+  Trace:    Complete journey of a request (segments stitched together)
+  Segment:  Record for one service (e.g., your Lambda function)
+  Subsegment: Record for work within a segment (DB query, HTTP call)
+  Annotation: Key-value pairs indexed for filtering (e.g., user_id, order_id)
+  Metadata:   Key-value pairs NOT indexed (any size data)
+  Sampling:   Rate at which traces are captured (reduce cost/overhead)
+  Group:      Filter expression for segmenting traces (e.g., errors only)
 ```
+
+```bash
+# Enable X-Ray for Lambda
+aws lambda update-function-configuration \
+  --function-name my-function \
+  --tracing-config Mode=Active  # Active = always trace; PassThrough = only if upstream requests it
+
+# Enable X-Ray for API Gateway
+aws apigateway update-stage \
+  --rest-api-id $REST_API_ID \
+  --stage-name prod \
+  --patch-operations op=replace,path=/tracingEnabled,value=true
+
+# Configure sampling rules (reduce cost)
+aws xray create-sampling-rule \
+  --sampling-rule '{
+    "RuleName": "high-priority-traces",
+    "Priority": 1,
+    "FixedRate": 0.05,
+    "ReservoirSize": 10,
+    "ServiceName": "order-service",
+    "ServiceType": "AWS::Lambda::Function",
+    "Host": "*",
+    "HTTPMethod": "*",
+    "URLPath": "*",
+    "Version": 1,
+    "Attributes": {"env": "prod"}
+  }'
+
+# Create trace group (filter for dashboard/alerting)
+aws xray create-group \
+  --group-name errors-only \
+  --filter-expression "fault = true OR error = true" \
+  --insights-configuration InsightsEnabled=true
+```
+
+### X-Ray with Python Lambda
 
 ```python
-# Install: pip install aws-xray-sdk
 from aws_xray_sdk.core import xray_recorder, patch_all
-from aws_xray_sdk.ext.fastapi.middleware import XRayMiddleware
-from fastapi import FastAPI
+from aws_xray_sdk.core import patch
 
-# Auto-patch AWS SDK calls (boto3) to trace them
+# Patch all supported libraries (boto3, requests, psycopg2, etc.)
 patch_all()
 
-app = FastAPI()
-app.add_middleware(XRayMiddleware, recorder=xray_recorder)
-
-xray_recorder.configure(service="my-fastapi-app")
-
-
-@app.get("/orders/{order_id}")
-async def get_order(order_id: str):
-    # Create a sub-segment for custom tracing
-    with xray_recorder.in_subsegment("fetch-order"):
-        order = await get_from_db(order_id)
+@xray_recorder.capture('process_order')
+def process_order(order_id: str) -> dict:
+    # This creates a subsegment named 'process_order'
     
-    with xray_recorder.in_subsegment("enrich-order"):
-        xray_recorder.current_subsegment().put_annotation("order_id", order_id)
-        enriched = await enrich_with_user_data(order)
+    # Add annotations (searchable/filterable)
+    xray_recorder.current_subsegment().put_annotation('order_id', order_id)
+    xray_recorder.current_subsegment().put_annotation('environment', 'prod')
     
-    return enriched
+    # Add metadata (not indexed, any data)
+    xray_recorder.current_subsegment().put_metadata('order_details', {
+        'order_id': order_id,
+        'processing_start': time.time()
+    })
+    
+    with xray_recorder.in_subsegment('database_query') as sub:
+        sub.put_annotation('db_name', 'orders_db')
+        result = db.get_order(order_id)
+    
+    with xray_recorder.in_subsegment('external_api_call') as sub:
+        sub.put_annotation('service', 'payment-gateway')
+        payment_result = call_payment_api(result)
+    
+    return payment_result
+
+def handler(event, context):
+    order_id = event['pathParameters']['orderId']
+    
+    # Add trace annotation at root level
+    xray_recorder.current_segment().put_annotation('user_id', 
+        event.get('requestContext', {}).get('authorizer', {}).get('claims', {}).get('sub'))
+    
+    result = process_order(order_id)
+    return {'statusCode': 200, 'body': json.dumps(result)}
 ```
 
 ---
 
 ## 10.8 AWS Config — Resource Configuration Compliance
 
-Config continuously records the configuration of AWS resources and evaluates against rules.
+AWS Config continuously monitors and records AWS resource configurations, enabling compliance rules and change history.
 
 ```bash
-# Enable Config
+# Set up Config recorder
 aws configservice put-configuration-recorder \
   --configuration-recorder '{
     "name": "default",
-    "roleARN": "arn:aws:iam::123456:role/config-role",
+    "roleARN": "arn:aws:iam::123:role/AWSConfigRole",
     "recordingGroup": {
       "allSupported": true,
       "includeGlobalResourceTypes": true
     }
   }'
 
+# Set delivery channel (where Config stores data)
 aws configservice put-delivery-channel \
   --delivery-channel '{
     "name": "default",
-    "s3BucketName": "my-config-logs",
+    "s3BucketName": "my-config-bucket",
+    "snsTopicARN": "arn:aws:sns:us-east-1:123:config-alerts",
     "configSnapshotDeliveryProperties": {
       "deliveryFrequency": "TwentyFour_Hours"
     }
@@ -421,7 +618,8 @@ aws configservice put-delivery-channel \
 
 aws configservice start-configuration-recorder --configuration-recorder-name default
 
-# Add a managed rule — check all S3 buckets are not publicly accessible
+# ── MANAGED RULES ─────────────────────────────────────────────
+# Check S3 bucket public access
 aws configservice put-config-rule \
   --config-rule '{
     "ConfigRuleName": "s3-bucket-public-read-prohibited",
@@ -431,62 +629,144 @@ aws configservice put-config-rule \
     }
   }'
 
+# Require MFA for console access
+aws configservice put-config-rule \
+  --config-rule '{
+    "ConfigRuleName": "root-mfa-enabled",
+    "Source": {"Owner": "AWS", "SourceIdentifier": "ROOT_ACCOUNT_MFA_ENABLED"}
+  }'
+
+# Required tags on EC2 instances
+aws configservice put-config-rule \
+  --config-rule '{
+    "ConfigRuleName": "required-tags-ec2",
+    "Source": {"Owner": "AWS", "SourceIdentifier": "REQUIRED_TAGS"},
+    "InputParameters": "{\"tag1Key\":\"Environment\",\"tag2Key\":\"Owner\",\"tag3Key\":\"Project\"}",
+    "Scope": {"ComplianceResourceTypes": ["AWS::EC2::Instance"]}
+  }'
+
+# ── CONFORMANCE PACKS ─────────────────────────────────────────
+# Deploy a set of rules (security baseline)
+aws configservice put-conformance-pack \
+  --conformance-pack-name security-baseline \
+  --template-s3-uri s3://my-config-templates/security-baseline.yaml \
+  # OR use AWS-managed templates:
+  # --template-body "$(cat aws-security-best-practices.yaml)"
+
 # Check compliance
 aws configservice describe-compliance-by-config-rule \
-  --config-rule-names s3-bucket-public-read-prohibited
+  --config-rule-names s3-bucket-public-read-prohibited \
+  --compliance-types NON_COMPLIANT
 
-# View resource history (what did this S3 bucket look like 3 days ago?)
-aws configservice get-resource-config-history \
-  --resource-type AWS::S3::Bucket \
-  --resource-id my-bucket \
-  --later-time $(date -u +%Y-%m-%dT%H:%M:%SZ) \
-  --limit 5
+# Get non-compliant resources
+aws configservice get-compliance-details-by-config-rule \
+  --config-rule-name s3-bucket-public-read-prohibited \
+  --compliance-types NON_COMPLIANT
+
+# Config Aggregator (multi-account/region view)
+aws configservice put-configuration-aggregator \
+  --configuration-aggregator-name org-aggregator \
+  --organization-aggregation-source '{
+    "RoleArn": "arn:aws:iam::123:role/ConfigAggregatorRole",
+    "AllAwsRegions": true
+  }'
 ```
 
 ---
 
-## 10.9 Key Monitoring Metrics to Track
+## 10.9 CloudWatch Agent on EC2
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│              ESSENTIAL METRICS CHEATSHEET                    │
-├─────────────────────┬────────────────────────────────────────┤
-│ EC2                 │ CPUUtilization, NetworkIn/Out,         │
-│                     │ StatusCheckFailed, DiskReadOps         │
-├─────────────────────┼────────────────────────────────────────┤
-│ RDS                 │ CPUUtilization, FreeStorageSpace,      │
-│                     │ DatabaseConnections, ReadLatency,      │
-│                     │ WriteLatency, FreeableMemory           │
-├─────────────────────┼────────────────────────────────────────┤
-│ Lambda              │ Invocations, Errors, Throttles,        │
-│                     │ Duration, ConcurrentExecutions,        │
-│                     │ IteratorAge (SQS/Kinesis trigger)      │
-├─────────────────────┼────────────────────────────────────────┤
-│ ALB                 │ RequestCount, HTTPCode_ELB_5XX_Count,  │
-│                     │ TargetResponseTime, HealthyHostCount   │
-├─────────────────────┼────────────────────────────────────────┤
-│ ECS/Fargate         │ CPUUtilization, MemoryUtilization,     │
-│                     │ RunningTaskCount                       │
-├─────────────────────┼────────────────────────────────────────┤
-│ SQS                 │ ApproximateNumberOfMessagesVisible,    │
-│                     │ ApproximateAgeOfOldestMessage          │
-│                     │ (DLQ depth!)                           │
-├─────────────────────┼────────────────────────────────────────┤
-│ DynamoDB            │ ConsumedReadCapacityUnits,             │
-│                     │ ConsumedWriteCapacityUnits,            │
-│                     │ SystemErrors, ThrottledRequests        │
-└─────────────────────┴────────────────────────────────────────┘
+```bash
+# Install CloudWatch agent via SSM
+aws ssm send-command \
+  --instance-ids i-0abc123 \
+  --document-name "AWS-ConfigureAWSPackage" \
+  --parameters '{"action":["Install"],"name":["AmazonCloudWatchAgent"]}'
+
+# Configure agent (collect memory, disk, custom logs)
+cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json << 'EOF'
+{
+  "agent": {
+    "metrics_collection_interval": 60,
+    "run_as_user": "cwagent"
+  },
+  "metrics": {
+    "namespace": "CWAgent",
+    "append_dimensions": {
+      "InstanceId": "${aws:InstanceId}",
+      "AutoScalingGroupName": "${aws:AutoScalingGroupName}"
+    },
+    "metrics_collected": {
+      "cpu": {
+        "measurement": ["cpu_usage_idle", "cpu_usage_iowait", "cpu_usage_user", "cpu_usage_system"],
+        "metrics_collection_interval": 60,
+        "totalcpu": false
+      },
+      "disk": {
+        "measurement": ["used_percent", "inodes_free"],
+        "metrics_collection_interval": 60,
+        "resources": ["*"]
+      },
+      "mem": {
+        "measurement": ["mem_used_percent"],
+        "metrics_collection_interval": 60
+      },
+      "statsd": {
+        "service_address": ":8125",
+        "metrics_collection_interval": 10
+      }
+    }
+  },
+  "logs": {
+    "logs_collected": {
+      "files": {
+        "collect_list": [
+          {
+            "file_path": "/var/log/app/application.log",
+            "log_group_name": "/app/prod/my-service",
+            "log_stream_name": "{instance_id}",
+            "timestamp_format": "%Y-%m-%dT%H:%M:%S"
+          },
+          {
+            "file_path": "/var/log/nginx/access.log",
+            "log_group_name": "/nginx/prod/access",
+            "log_stream_name": "{instance_id}"
+          }
+        ]
+      }
+    }
+  }
+}
+EOF
+
+# Start CloudWatch agent
+/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+  -a fetch-config -m ec2 \
+  -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json \
+  -s
 ```
 
 ---
 
-## 10.10 Interview Questions
+## 10.10 Interview Q&A
 
 **Q: What is the difference between CloudWatch and CloudTrail?**
-> CloudWatch monitors the **performance and health** of AWS resources and applications — CPU, memory, error counts, latency — and triggers alarms. CloudTrail records **API activity** — who made what API call, when, from which IP. CloudWatch answers "is my system healthy?"; CloudTrail answers "who did this and when?". Both are essential for production systems.
+A: CloudWatch monitors AWS resource performance and application health — metrics, logs, and alarms for operational monitoring (CPU usage, error rates, latency). CloudTrail is a security and audit service that records every AWS API call — who did what, when, and from where (create/modify/delete resources). CloudWatch answers "is my system healthy?"; CloudTrail answers "who changed what?"
 
-**Q: How would you debug a slow Lambda function?**
-> (1) Check CloudWatch Logs for ERROR messages or slow queries. (2) Enable X-Ray tracing to see exactly where time is spent (DB calls, external APIs, cold start overhead). (3) Look at CloudWatch Metrics: Duration P95/P99 tells you worst-case latency, IteratorAge tells you queue backlog for SQS triggers. (4) Check if it's a cold start — provisioned concurrency eliminates this. (5) Use CloudWatch Insights to query logs for patterns over time.
+**Q: What are the three types of CloudWatch alarms?**
+A: (1) Metric alarms: trigger based on a single CloudWatch metric crossing a threshold; (2) Composite alarms: combine multiple alarms with AND/OR logic to reduce alert noise; (3) Anomaly detection alarms: use ML to establish a baseline and alert when metrics deviate beyond expected bands.
 
-**Q: How would you set up alerting for a production outage?**
-> Multi-layer approach: (1) ALB 5xx alarm → SNS → PagerDuty/Slack within 1 minute. (2) Lambda error rate alarm. (3) RDS connection errors and latency alarms. (4) SQS DLQ depth alarm (messages failing to process). (5) Custom application health metric. (6) CloudWatch Synthetics (canary) — scheduled test that hits the API every minute and alarms if it fails. This ensures you're alerted within 1-2 minutes of any customer-facing issue.
+**Q: How do you debug a Lambda function in production using CloudWatch?**
+A: Multiple tools: (1) CloudWatch Logs — Lambda automatically writes stdout/stderr to log groups; use Logs Insights to query; (2) CloudWatch Metrics — monitor Duration, Errors, Throttles, ConcurrentExecutions; (3) X-Ray — enable active tracing to see request flows and identify slow operations; (4) Lambda Power Tuning — identify optimal memory/cost configuration; (5) Lambda Destinations — capture failed invocations with full event context.
+
+**Q: What is an AWS Config conformance pack?**
+A: A conformance pack is a collection of AWS Config rules and remediation actions packaged as a single deployable unit. It simplifies deploying a compliance standard (like CIS AWS Benchmarks, PCI-DSS, HIPAA) across your organization. AWS provides pre-built templates; you can customize or create your own. Conformance packs provide an aggregate compliance score.
+
+**Q: What is CloudTrail log file validation and why is it important?**
+A: Log file validation creates a cryptographic hash (SHA-256) of each log file delivered to S3 and stores it in a digest file. This allows you to verify that log files haven't been tampered with or deleted after delivery. Important for compliance and forensics — proves that audit logs are complete and unaltered. Enable with `--enable-log-file-validation` when creating a trail.
+
+**Q: How does X-Ray sampling work?**
+A: X-Ray samples a subset of requests to trace (tracing all requests would add latency and cost). The default sampling rule traces 1 request per second per reservoir plus 5% of additional requests. Custom sampling rules can match on service name, HTTP method, URL path, or custom attributes. For latency-sensitive paths, you can reduce sampling; for critical operations or debugging, you can increase to 100%.
+
+**Q: What are CloudWatch Logs Insights and when would you use it?**
+A: Logs Insights is an interactive query service for CloudWatch Logs using a purpose-built query language. Use it when: searching logs across many log streams simultaneously; analyzing patterns (error frequency, response times); creating dashboards from log data; debugging by correlating log events across services. Queries are charged per GB scanned, so use time filters and specific log groups to minimize cost.

@@ -1,774 +1,293 @@
-# Part VIII: Code Templates & Quick Reference
-## Ready-to-Use Production Templates
+# Part 8: Templates & Reference
 
 ---
 
-# Template 1: FastAPI Starter Template
+## FastAPI Templates
+
+### Minimal FastAPI App
 
 ```python
-# app/main.py
-"""
-Production-ready FastAPI template
-"""
-from fastapi import FastAPI, HTTPException, Depends, status
+# main.py — minimal production-ready FastAPI
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
-from typing import List, Optional
-import logging
-import os
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+@asynccontextmanager
+async def lifespan(app):
+    # startup
+    yield
+    # shutdown
 
-# Environment
-ENV = os.getenv("ENVIRONMENT", "development")
+app = FastAPI(title="My API", lifespan=lifespan)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-# App initialization
-app = FastAPI(
-    title="My API",
-    description="Production API",
-    version="1.0.0",
-    docs_url="/docs" if ENV != "production" else None,
-    redoc_url="/redoc" if ENV != "production" else None,
-)
-
-# CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=os.getenv("ALLOWED_ORIGINS", "*").split(","),
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Models
-class ItemBase(BaseModel):
-    name: str = Field(..., min_length=1, max_length=100)
-    description: Optional[str] = Field(None, max_length=500)
-    price: float = Field(..., gt=0)
-
-class ItemCreate(ItemBase):
-    pass
-
-class Item(ItemBase):
-    id: str
-
-    class Config:
-        from_attributes = True
-
-class ItemList(BaseModel):
-    items: List[Item]
-    total: int
-
-# Dependencies
-def get_db():
-    """Database dependency - replace with real implementation."""
-    db = {}  # Replace with actual DB
-    try:
-        yield db
-    finally:
-        pass  # Close connection
-
-# Middleware
-@app.middleware("http")
-async def log_requests(request, call_next):
-    logger.info(f"{request.method} {request.url.path}")
-    response = await call_next(request)
-    return response
-
-# Health check
 @app.get("/health")
-def health_check():
-    return {"status": "healthy", "environment": ENV}
-
-# Routes
-@app.get("/items", response_model=ItemList)
-def list_items(
-    skip: int = 0,
-    limit: int = 10,
-    db: dict = Depends(get_db)
-):
-    items = list(db.values())[skip:skip+limit]
-    return ItemList(items=items, total=len(db))
-
-@app.get("/items/{item_id}", response_model=Item)
-def get_item(item_id: str, db: dict = Depends(get_db)):
-    if item_id not in db:
-        raise HTTPException(status_code=404, detail="Item not found")
-    return db[item_id]
-
-@app.post("/items", response_model=Item, status_code=status.HTTP_201_CREATED)
-def create_item(item: ItemCreate, db: dict = Depends(get_db)):
-    import uuid
-    item_id = str(uuid.uuid4())
-    new_item = Item(id=item_id, **item.dict())
-    db[item_id] = new_item
-    logger.info(f"Created item: {item_id}")
-    return new_item
-
-@app.delete("/items/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_item(item_id: str, db: dict = Depends(get_db)):
-    if item_id not in db:
-        raise HTTPException(status_code=404, detail="Item not found")
-    del db[item_id]
-    logger.info(f"Deleted item: {item_id}")
-
-# For Lambda deployment
-from mangum import Mangum
-handler = Mangum(app, lifespan="off")
+def health(): return {"ok": True}
 ```
 
----
-
-# Template 2: CDK Stack Template
+### Pydantic Model Templates
 
 ```python
-# cdk/stacks/api_stack.py
-"""
-Production CDK stack template
-"""
-from aws_cdk import (
-    Stack,
-    Duration,
-    RemovalPolicy,
-    CfnOutput,
-    Tags,
-    aws_lambda as _lambda,
-    aws_apigateway as apigw,
-    aws_dynamodb as dynamodb,
-    aws_logs as logs,
-    aws_iam as iam,
-    aws_cloudwatch as cloudwatch,
-    aws_cloudwatch_actions as cw_actions,
-    aws_sns as sns,
-)
-from constructs import Construct
-from dataclasses import dataclass
+from pydantic import BaseModel, Field, EmailStr, field_validator
 from typing import Optional
+from datetime import datetime
 
-@dataclass
-class StackConfig:
-    """Configuration for the stack."""
-    env_name: str
-    memory_size: int = 512
-    timeout_seconds: int = 30
-    log_retention_days: int = 14
-    provisioned_concurrency: Optional[int] = None
+class CreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    email: EmailStr
+    value: float = Field(gt=0, le=1_000_000)
 
-class APIStack(Stack):
-    def __init__(
-        self,
-        scope: Construct,
-        id: str,
-        config: StackConfig,
-        **kwargs
-    ):
-        super().__init__(scope, id, **kwargs)
-        
-        # Tags
-        Tags.of(self).add("Environment", config.env_name)
-        Tags.of(self).add("Project", "my-api")
-        
-        # DynamoDB
-        self.table = dynamodb.Table(
-            self, "Table",
-            table_name=f"items-{config.env_name}",
-            partition_key=dynamodb.Attribute(
-                name="id",
-                type=dynamodb.AttributeType.STRING
-            ),
-            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
-            removal_policy=(
-                RemovalPolicy.RETAIN 
-                if config.env_name == "prod" 
-                else RemovalPolicy.DESTROY
-            ),
-            point_in_time_recovery=config.env_name == "prod",
-        )
-        
-        # Lambda
-        self.handler = _lambda.Function(
-            self, "Handler",
-            function_name=f"api-handler-{config.env_name}",
-            runtime=_lambda.Runtime.PYTHON_3_11,
-            handler="lambda_handler.handler",
-            code=_lambda.Code.from_asset(
-                "../app",
-                exclude=["*.pyc", "__pycache__", "tests"]
-            ),
-            memory_size=config.memory_size,
-            timeout=Duration.seconds(config.timeout_seconds),
-            environment={
-                "TABLE_NAME": self.table.table_name,
-                "ENVIRONMENT": config.env_name,
-                "LOG_LEVEL": "INFO"
-            },
-            log_retention=logs.RetentionDays(config.log_retention_days),
-            tracing=_lambda.Tracing.ACTIVE,
-        )
-        
-        # Permissions
-        self.table.grant_read_write_data(self.handler)
-        
-        # Provisioned concurrency for production
-        if config.provisioned_concurrency:
-            version = self.handler.current_version
-            version.add_alias(
-                "live",
-                provisioned_concurrent_executions=config.provisioned_concurrency
-            )
-        
-        # API Gateway
-        self.api = apigw.RestApi(
-            self, "API",
-            rest_api_name=f"api-{config.env_name}",
-            deploy_options=apigw.StageOptions(
-                stage_name=config.env_name,
-                logging_level=apigw.MethodLoggingLevel.INFO,
-                throttling_rate_limit=1000,
-                throttling_burst_limit=500,
-            ),
-            default_cors_preflight_options=apigw.CorsOptions(
-                allow_origins=apigw.Cors.ALL_ORIGINS,
-                allow_methods=apigw.Cors.ALL_METHODS,
-            )
-        )
-        
-        # Proxy integration
-        self.api.root.add_proxy(
-            default_integration=apigw.LambdaIntegration(self.handler),
-            any_method=True
-        )
-        
-        # Monitoring
-        self._setup_monitoring(config)
-        
-        # Outputs
-        CfnOutput(self, "ApiUrl", value=self.api.url)
-        CfnOutput(self, "TableName", value=self.table.table_name)
-    
-    def _setup_monitoring(self, config: StackConfig):
-        """Setup CloudWatch alarms and dashboards."""
-        
-        # Alarm topic
-        alarm_topic = sns.Topic(self, "AlarmTopic")
-        
-        # Lambda errors alarm
-        error_alarm = cloudwatch.Alarm(
-            self, "ErrorAlarm",
-            metric=self.handler.metric_errors(),
-            threshold=5,
-            evaluation_periods=1,
-            alarm_description="Lambda errors exceeded threshold",
-        )
-        error_alarm.add_alarm_action(cw_actions.SnsAction(alarm_topic))
-        
-        # Dashboard
-        dashboard = cloudwatch.Dashboard(
-            self, "Dashboard",
-            dashboard_name=f"api-{config.env_name}"
-        )
-        
-        dashboard.add_widgets(
-            cloudwatch.GraphWidget(
-                title="Lambda Metrics",
-                left=[
-                    self.handler.metric_invocations(),
-                    self.handler.metric_errors(),
-                ]
-            ),
-            cloudwatch.GraphWidget(
-                title="Duration",
-                left=[self.handler.metric_duration()]
-            )
-        )
+class UpdateRequest(BaseModel):
+    name: Optional[str] = Field(None, min_length=1, max_length=100)
+    value: Optional[float] = Field(None, gt=0)
+
+class Response(BaseModel):
+    id: int
+    name: str
+    created_at: datetime
+    model_config = {"from_attributes": True}
+
+class PaginatedResponse(BaseModel):
+    items: list[Response]
+    total: int
+    page: int
+    pages: int
+```
+
+### Authentication Template
+
+```python
+# OAuth2 + JWT pattern
+from fastapi.security import OAuth2PasswordBearer
+from jose import jwt, JWTError
+from passlib.context import CryptContext
+from datetime import datetime, timedelta, timezone
+
+pwd_context = CryptContext(schemes=["bcrypt"])
+oauth2 = OAuth2PasswordBearer(tokenUrl="/token")
+SECRET = "your-secret-key"
+ALGORITHM = "HS256"
+
+def hash_password(p): return pwd_context.hash(p)
+def verify_password(plain, hashed): return pwd_context.verify(plain, hashed)
+
+def create_token(subject: str, expire_minutes: int = 30) -> str:
+    expire = datetime.now(timezone.utc) + timedelta(minutes=expire_minutes)
+    return jwt.encode({"sub": subject, "exp": expire}, SECRET, ALGORITHM)
+
+async def get_current_user(token: str = Depends(oauth2)):
+    try:
+        payload = jwt.decode(token, SECRET, [ALGORITHM])
+        user_id = payload.get("sub")
+    except JWTError:
+        raise HTTPException(401, "Invalid token", headers={"WWW-Authenticate": "Bearer"})
+    return user_id
 ```
 
 ---
 
-# Template 3: Kubernetes Deployment Template
+## AWS CDK Templates
+
+### VPC Template
+
+```python
+vpc = ec2.Vpc(self, "VPC",
+    ip_addresses=ec2.IpAddresses.cidr("10.0.0.0/16"),
+    max_azs=3,
+    nat_gateways=1,
+    subnet_configuration=[
+        ec2.SubnetConfiguration(name="Public", subnet_type=ec2.SubnetType.PUBLIC, cidr_mask=24),
+        ec2.SubnetConfiguration(name="Private", subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS, cidr_mask=24),
+        ec2.SubnetConfiguration(name="DB", subnet_type=ec2.SubnetType.PRIVATE_ISOLATED, cidr_mask=24),
+    ],
+)
+vpc.add_gateway_endpoint("S3", service=ec2.GatewayVpcEndpointAwsService.S3)
+```
+
+### Lambda Template
+
+```python
+fn = lambda_.Function(self, "Function",
+    runtime=lambda_.Runtime.PYTHON_3_11,
+    handler="app.handler",
+    code=lambda_.Code.from_asset("src"),
+    architecture=lambda_.Architecture.ARM_64,
+    memory_size=512,
+    timeout=cdk.Duration.seconds(30),
+    tracing=lambda_.Tracing.ACTIVE,
+    environment={"TABLE": table.table_name},
+)
+table.grant_read_write_data(fn)
+```
+
+### ECS Fargate Template
+
+```python
+service = ecs_patterns.ApplicationLoadBalancedFargateService(self, "Service",
+    cluster=cluster,
+    cpu=512,
+    memory_limit_mib=1024,
+    desired_count=2,
+    task_image_options=ecs_patterns.ApplicationLoadBalancedTaskImageOptions(
+        image=ecs.ContainerImage.from_registry(image_uri),
+        container_port=8000,
+        task_role=task_role,
+        environment=env_vars,
+        secrets=secrets,
+    ),
+    circuit_breaker=ecs.DeploymentCircuitBreaker(rollback=True),
+)
+service.service.auto_scale_task_count(min_capacity=2, max_capacity=20).scale_on_cpu_utilization(
+    "CpuScaling", target_utilization_percent=70
+)
+```
+
+---
+
+## CloudFormation Quick Reference
+
+### Common Resource Types
+
+| Resource | CloudFormation Type |
+|----------|---------------------|
+| S3 Bucket | `AWS::S3::Bucket` |
+| Lambda Function | `AWS::Lambda::Function` |
+| DynamoDB Table | `AWS::DynamoDB::Table` |
+| ECS Service | `AWS::ECS::Service` |
+| Aurora Cluster | `AWS::RDS::DBCluster` |
+| VPC | `AWS::EC2::VPC` |
+| ALB | `AWS::ElasticLoadBalancingV2::LoadBalancer` |
+| API Gateway | `AWS::ApiGatewayV2::Api` |
+| IAM Role | `AWS::IAM::Role` |
+| CloudFront | `AWS::CloudFront::Distribution` |
+
+### Intrinsic Functions Quick Reference
 
 ```yaml
-# k8s/production-deployment.yaml
----
-# Namespace
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: ${APP_NAME}
-  labels:
-    app: ${APP_NAME}
+!Ref LogicalName                         # Reference resource or parameter
+!GetAtt Resource.Attribute               # Get attribute of resource
+!Sub 'string-with-${Variable}'           # String substitution
+!Join ['-', [!Ref Env, 'app']]          # Join list with delimiter
+!Select [0, !GetAZs '']                 # Select item from list
+!If [ConditionName, TrueValue, False]   # Conditional value
+!ImportValue ExportName                  # Cross-stack import
+!FindInMap [MapName, Key1, Key2]        # Look up in Mappings
+```
 
----
-# ConfigMap
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: ${APP_NAME}-config
-  namespace: ${APP_NAME}
-data:
-  ENVIRONMENT: "production"
-  LOG_LEVEL: "INFO"
-  WORKERS: "4"
+### Deletion/Update Policies
 
----
-# Secret (use external secrets in production!)
-apiVersion: v1
-kind: Secret
-metadata:
-  name: ${APP_NAME}-secrets
-  namespace: ${APP_NAME}
-type: Opaque
-stringData:
-  DATABASE_URL: "postgresql://user:pass@host:5432/db"
-  JWT_SECRET: "your-secret-key"
-
----
-# Deployment
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: ${APP_NAME}
-  namespace: ${APP_NAME}
-  labels:
-    app: ${APP_NAME}
-spec:
-  replicas: 3
-  strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxSurge: 1
-      maxUnavailable: 0
-  selector:
-    matchLabels:
-      app: ${APP_NAME}
-  template:
-    metadata:
-      labels:
-        app: ${APP_NAME}
-      annotations:
-        prometheus.io/scrape: "true"
-        prometheus.io/port: "8000"
-        prometheus.io/path: "/metrics"
-    spec:
-      serviceAccountName: ${APP_NAME}
-      securityContext:
-        runAsNonRoot: true
-        runAsUser: 1000
-      containers:
-        - name: ${APP_NAME}
-          image: ${IMAGE}
-          imagePullPolicy: Always
-          ports:
-            - name: http
-              containerPort: 8000
-              protocol: TCP
-          envFrom:
-            - configMapRef:
-                name: ${APP_NAME}-config
-            - secretRef:
-                name: ${APP_NAME}-secrets
-          resources:
-            requests:
-              memory: "256Mi"
-              cpu: "250m"
-            limits:
-              memory: "512Mi"
-              cpu: "1000m"
-          readinessProbe:
-            httpGet:
-              path: /health
-              port: 8000
-            initialDelaySeconds: 5
-            periodSeconds: 10
-            timeoutSeconds: 5
-            successThreshold: 1
-            failureThreshold: 3
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: 8000
-            initialDelaySeconds: 15
-            periodSeconds: 20
-            timeoutSeconds: 5
-            successThreshold: 1
-            failureThreshold: 3
-          securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities:
-              drop:
-                - ALL
-          volumeMounts:
-            - name: tmp
-              mountPath: /tmp
-      volumes:
-        - name: tmp
-          emptyDir: {}
-      topologySpreadConstraints:
-        - maxSkew: 1
-          topologyKey: topology.kubernetes.io/zone
-          whenUnsatisfiable: DoNotSchedule
-          labelSelector:
-            matchLabels:
-              app: ${APP_NAME}
-
----
-# Service
-apiVersion: v1
-kind: Service
-metadata:
-  name: ${APP_NAME}
-  namespace: ${APP_NAME}
-spec:
-  type: ClusterIP
-  selector:
-    app: ${APP_NAME}
-  ports:
-    - name: http
-      port: 80
-      targetPort: 8000
-      protocol: TCP
-
----
-# Ingress
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: ${APP_NAME}
-  namespace: ${APP_NAME}
-  annotations:
-    kubernetes.io/ingress.class: nginx
-    cert-manager.io/cluster-issuer: letsencrypt-prod
-    nginx.ingress.kubernetes.io/rate-limit: "100"
-spec:
-  tls:
-    - hosts:
-        - ${DOMAIN}
-      secretName: ${APP_NAME}-tls
-  rules:
-    - host: ${DOMAIN}
-      http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: ${APP_NAME}
-                port:
-                  number: 80
-
----
-# HorizontalPodAutoscaler
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  name: ${APP_NAME}-hpa
-  namespace: ${APP_NAME}
-spec:
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: ${APP_NAME}
-  minReplicas: 2
-  maxReplicas: 20
-  metrics:
-    - type: Resource
-      resource:
-        name: cpu
-        target:
-          type: Utilization
-          averageUtilization: 70
-    - type: Resource
-      resource:
-        name: memory
-        target:
-          type: Utilization
-          averageUtilization: 80
-
----
-# PodDisruptionBudget
-apiVersion: policy/v1
-kind: PodDisruptionBudget
-metadata:
-  name: ${APP_NAME}-pdb
-  namespace: ${APP_NAME}
-spec:
-  minAvailable: 1
-  selector:
-    matchLabels:
-      app: ${APP_NAME}
-
----
-# ServiceAccount
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: ${APP_NAME}
-  namespace: ${APP_NAME}
+```yaml
+Resources:
+  MyDB:
+    Type: AWS::RDS::DBCluster
+    DeletionPolicy: Retain      # Keep on stack delete
+    UpdateReplacePolicy: Retain # Keep on resource replace
+    Properties:
+      DeletionProtection: true   # Prevent CLI delete
 ```
 
 ---
 
-# Part IX: Quick Reference Cheat Sheets
+## Kubernetes Quick Reference
 
-## FastAPI Cheat Sheet
-
-```python
-# Quick Reference
-
-# Basic app
-from fastapi import FastAPI
-app = FastAPI()
-
-# Route methods
-@app.get("/items")
-@app.post("/items")
-@app.put("/items/{id}")
-@app.delete("/items/{id}")
-@app.patch("/items/{id}")
-
-# Path parameters
-@app.get("/items/{item_id}")
-def get(item_id: int):
-    pass
-
-# Query parameters
-@app.get("/items")
-def list(skip: int = 0, limit: int = 10):
-    pass
-
-# Request body
-from pydantic import BaseModel
-class Item(BaseModel):
-    name: str
-
-@app.post("/items")
-def create(item: Item):
-    pass
-
-# Dependency injection
-from fastapi import Depends
-
-def get_db():
-    yield db
-
-@app.get("/")
-def read(db = Depends(get_db)):
-    pass
-
-# Authentication
-from fastapi.security import OAuth2PasswordBearer
-oauth2 = OAuth2PasswordBearer(tokenUrl="token")
-
-# File upload
-from fastapi import File, UploadFile
-@app.post("/upload")
-async def upload(file: UploadFile = File(...)):
-    pass
-
-# Background tasks
-from fastapi import BackgroundTasks
-@app.post("/")
-def create(bg: BackgroundTasks):
-    bg.add_task(func, arg)
-
-# Response types
-from fastapi.responses import JSONResponse, HTMLResponse, RedirectResponse
-```
-
-## AWS CDK Cheat Sheet
-
-```python
-# Quick Reference
-
-# Initialize project
-cdk init app --language python
-
-# Common commands
-cdk bootstrap
-cdk synth
-cdk deploy
-cdk diff
-cdk destroy
-
-# Common resources
-from aws_cdk import (
-    aws_lambda as _lambda,
-    aws_dynamodb as dynamodb,
-    aws_s3 as s3,
-    aws_apigateway as apigw,
-    aws_sqs as sqs,
-    aws_sns as sns,
-)
-
-# Lambda
-_lambda.Function(self, "Fn",
-    runtime=_lambda.Runtime.PYTHON_3_11,
-    handler="main.handler",
-    code=_lambda.Code.from_asset("./lambda")
-)
-
-# DynamoDB
-dynamodb.Table(self, "Table",
-    partition_key=dynamodb.Attribute(
-        name="id", type=dynamodb.AttributeType.STRING
-    )
-)
-
-# S3
-s3.Bucket(self, "Bucket",
-    versioned=True,
-    encryption=s3.BucketEncryption.S3_MANAGED
-)
-
-# Grant permissions
-table.grant_read_write_data(lambda_fn)
-bucket.grant_read(lambda_fn)
-```
-
-## kubectl Cheat Sheet
+### Common kubectl Commands
 
 ```bash
-# Cluster
-kubectl cluster-info
-kubectl get nodes
-
 # Pods
-kubectl get pods [-o wide] [-n namespace]
-kubectl describe pod <name>
-kubectl logs <pod> [-f]
-kubectl exec -it <pod> -- bash
+kubectl get pods -n myapp
+kubectl describe pod <name> -n myapp
+kubectl logs <pod> -n myapp --follow
+kubectl exec -it <pod> -n myapp -- /bin/sh
 
 # Deployments
-kubectl get deployments
-kubectl scale deployment <name> --replicas=3
-kubectl rollout status deployment <name>
-kubectl rollout undo deployment <name>
+kubectl rollout status deployment/orders-api -n myapp
+kubectl rollout history deployment/orders-api -n myapp
+kubectl rollout undo deployment/orders-api -n myapp
 
-# Services
-kubectl get services
-kubectl expose deployment <name> --port=80
+# Scaling
+kubectl scale deployment orders-api --replicas=5 -n myapp
 
-# Apply/Delete
-kubectl apply -f file.yaml
-kubectl delete -f file.yaml
+# Secrets & ConfigMaps
+kubectl create secret generic app-secrets --from-literal=KEY=value -n myapp
+kubectl get secret app-secrets -o jsonpath='{.data.KEY}' | base64 -d
 
-# Debug
-kubectl get events
-kubectl top pods
-kubectl describe node <name>
+# Resources
+kubectl top pods -n myapp
+kubectl top nodes
 
-# Context
-kubectl config get-contexts
-kubectl config use-context <name>
+# Port forwarding for debugging
+kubectl port-forward svc/orders-api 8080:80 -n myapp
 ```
 
-## Lambda Best Practices
+### Useful Annotations
 
-```python
-# 1. Initialize OUTSIDE handler
-import boto3
-dynamodb = boto3.resource('dynamodb')
-table = dynamodb.Table('my-table')
+```yaml
+# ALB Ingress
+alb.ingress.kubernetes.io/scheme: internet-facing
+alb.ingress.kubernetes.io/target-type: ip
+alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:...
 
-def handler(event, context):
-    # Just use pre-initialized resources
-    return table.get_item(Key={'id': '1'})
+# IRSA
+eks.amazonaws.com/role-arn: arn:aws:iam::ACCOUNT:role/ROLE_NAME
 
-# 2. Environment variables
-import os
-TABLE_NAME = os.environ['TABLE_NAME']
-
-# 3. Error handling
-def handler(event, context):
-    try:
-        # Your code
-        pass
-    except Exception as e:
-        logger.error(f"Error: {e}")
-        raise
-
-# 4. Structured logging
-import json
-import logging
-logger = logging.getLogger()
-logger.setLevel(logging.INFO)
-
-def handler(event, context):
-    logger.info(json.dumps({
-        "event": "processing",
-        "request_id": context.aws_request_id
-    }))
+# Prometheus scraping
+prometheus.io/scrape: "true"
+prometheus.io/port: "8000"
+prometheus.io/path: "/metrics"
 ```
 
 ---
 
-## AWS Architecture Patterns
+## Docker Cheat Sheet
 
-```
-# Pattern 1: Synchronous API
-Client → API Gateway → Lambda → DynamoDB
+```bash
+# Build
+docker build -t myapi:latest .
+docker build -t myapi:v1.0 --platform linux/arm64 .    # For Graviton
 
-# Pattern 2: Async Processing
-Client → API Gateway → Lambda → SQS → Lambda → DynamoDB
+# Run
+docker run -p 8000:8000 --env-file .env myapi:latest
 
-# Pattern 3: Event-Driven
-S3 (upload) → Lambda → DynamoDB
-                    → SNS → Email
+# Push to ECR
+aws ecr get-login-password | docker login --username AWS --password-stdin ACCOUNT.dkr.ecr.REGION.amazonaws.com
+docker tag myapi:latest ACCOUNT.dkr.ecr.REGION.amazonaws.com/myapi:latest
+docker push ACCOUNT.dkr.ecr.REGION.amazonaws.com/myapi:latest
 
-# Pattern 4: Microservices on EKS
-ALB → Ingress → Service A
-              → Service B
-              → Service C
+# Inspect
+docker inspect myapi:latest
+docker history myapi:latest --no-trunc
+docker stats
 
-# Pattern 5: Hybrid
-CloudFront → S3 (static)
-          → API Gateway → Lambda → RDS
+# Cleanup
+docker system prune -af
 ```
 
 ---
 
-# Final Checklist
+## AWS CLI Quick Reference
 
-## Production Readiness
+```bash
+# ECS
+aws ecs list-clusters
+aws ecs describe-services --cluster myapp --services orders-api
+aws ecs update-service --cluster myapp --service orders-api --force-new-deployment
 
-### Application
-- [ ] Input validation
-- [ ] Error handling
-- [ ] Logging
-- [ ] Health endpoints
-- [ ] Rate limiting
-- [ ] Authentication
-- [ ] CORS configured
+# Lambda
+aws lambda list-functions --query "Functions[*].[FunctionName,Runtime]"
+aws lambda invoke --function-name myfunction --payload '{}' response.json
+aws lambda update-function-configuration --function-name myfunction --memory-size 1024
 
-### Infrastructure
-- [ ] VPC configuration
-- [ ] Security groups
-- [ ] IAM least privilege
-- [ ] Encryption at rest
-- [ ] Encryption in transit
-- [ ] Backups configured
+# DynamoDB
+aws dynamodb scan --table-name orders-prod --select COUNT
+aws dynamodb get-item --table-name orders-prod --key '{"PK":{"S":"ORDER#123"},"SK":{"S":"METADATA"}}'
 
-### Monitoring
-- [ ] CloudWatch metrics
-- [ ] Alarms configured
-- [ ] Dashboard created
-- [ ] Log retention set
-- [ ] Tracing enabled
+# CloudFormation
+aws cloudformation describe-stacks --query "Stacks[*].[StackName,StackStatus]" --output table
+aws cloudformation get-template --stack-name mystack
+aws cloudformation list-stack-resources --stack-name mystack
 
-### CI/CD
-- [ ] Automated testing
-- [ ] Staging environment
-- [ ] Blue/green deployment
-- [ ] Rollback procedure
-
----
-
-**END OF GUIDE**
-
-This comprehensive guide covers everything you need to build, deploy, and manage FastAPI applications with AWS CDK, Lambda, and Kubernetes. Good luck with your projects and interviews!
+# Logs
+aws logs tail /ecs/myapp/prod/app --follow
+aws logs filter-log-events --log-group-name /ecs/myapp --filter-pattern "ERROR"
+```

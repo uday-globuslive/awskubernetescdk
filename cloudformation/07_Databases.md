@@ -1,406 +1,382 @@
-# Chapter 7: Databases
-## RDS, DynamoDB & ElastiCache in CloudFormation
+# CloudFormation Chapter 7: Database Templates
+## RDS, Aurora, DynamoDB, and ElastiCache CloudFormation Resources
 
 ---
 
-## 7.1 RDS — Aurora PostgreSQL
+## 7.1 Aurora PostgreSQL Cluster
 
 ```yaml
-# databases.yaml — RDS Aurora + DynamoDB + ElastiCache
-AWSTemplateFormatVersion: "2010-09-09"
-Description: Database layer — Aurora PostgreSQL, DynamoDB, ElastiCache Redis
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Aurora PostgreSQL cluster with Multi-AZ and auto-scaling
 
 Parameters:
-  NetworkingStack:
-    Type: String
-    Description: Networking stack name for cross-stack imports
-
   Environment:
     Type: String
-    Default: dev
     AllowedValues: [dev, staging, prod]
-
-  DBName:
-    Type: String
-    Default: appdb
-
-  DBUsername:
-    Type: String
-    Default: dbadmin
-
-  DBPassword:
+  
+  DBMasterPassword:
     Type: String
     NoEcho: true
-    MinLength: 8
+    MinLength: 12
 
   DBInstanceClass:
     Type: String
-    Default: db.t3.medium
-    AllowedValues: [db.t3.micro, db.t3.medium, db.r6g.large, db.r6g.xlarge]
+    Default: db.r6g.medium
+    AllowedValues: [db.t4g.medium, db.r6g.medium, db.r6g.large, db.r6g.xlarge, db.r6g.2xlarge]
 
 Conditions:
   IsProd: !Equals [!Ref Environment, prod]
-  IsMultiAZ: !Equals [!Ref Environment, prod]
 
 Resources:
+  # ── KMS Key for RDS Encryption ────────────────────────
+  DBKMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: KMS key for Aurora encryption
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Effect: Allow
+            Principal:
+              Service: rds.amazonaws.com
+            Action:
+              - kms:GenerateDataKey
+              - kms:Decrypt
+            Resource: '*'
 
-  # ============================================================
-  # SECURITY GROUP FOR RDS
-  # ============================================================
+  DBKMSAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub 'alias/${AWS::StackName}-db'
+      TargetKeyId: !Ref DBKMSKey
+
+  # ── DB Security Group ─────────────────────────────────
   DBSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: RDS security group
-      VpcId: !ImportValue
-        Fn::Sub: "${NetworkingStack}-VpcId"
+      GroupDescription: Aurora database security group
+      VpcId: !ImportValue 'network-stack-VpcId'
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !ImportValue 'app-stack-AppSecurityGroupId'
+          Description: PostgreSQL access from app tier
       Tags:
         - Key: Name
-          Value: !Sub "${AWS::StackName}-db-sg"
+          Value: !Sub '${AWS::StackName}-db-sg'
 
-  # Allow DB access only from application security group
-  # (Add rule separately to avoid circular dependency)
-  DBSecurityGroupIngress:
-    Type: AWS::EC2::SecurityGroupIngress
+  # ── DB Parameter Group ────────────────────────────────
+  DBParameterGroup:
+    Type: AWS::RDS::DBClusterParameterGroup
     Properties:
-      GroupId: !Ref DBSecurityGroup
-      IpProtocol: tcp
-      FromPort: 5432
-      ToPort: 5432
-      CidrIp: !ImportValue
-        Fn::Sub: "${NetworkingStack}-VpcCidr"
-      Description: PostgreSQL from VPC
+      DBClusterParameterGroupName: !Sub '${AWS::StackName}-aurora-pg15'
+      Description: Aurora PostgreSQL 15 parameter group
+      Family: aurora-postgresql15
+      Parameters:
+        shared_buffers: "262144"           # 256MB (in 8KB pages)
+        work_mem: "65536"                  # 64MB per sort/hash
+        max_connections: "200"
+        effective_cache_size: "786432"     # 768MB
+        log_min_duration_statement: "1000" # Log queries > 1s
+        log_lock_waits: "on"
+        wal_level: logical                 # Enable logical replication
+        rds.log_retention_period: "10080"  # 7 days in minutes
 
-  # ============================================================
-  # RDS SUBNET GROUP
-  # ============================================================
+  # ── DB Subnet Group ───────────────────────────────────
   DBSubnetGroup:
     Type: AWS::RDS::DBSubnetGroup
     Properties:
-      DBSubnetGroupDescription: DB subnet group
-      SubnetIds:
-        - !Select
-          - 0
-          - !Split
-            - ","
-            - !ImportValue
-              Fn::Sub: "${NetworkingStack}-DBSubnets"
-        - !Select
-          - 1
-          - !Split
-            - ","
-            - !ImportValue
-              Fn::Sub: "${NetworkingStack}-DBSubnets"
-      Tags:
-        - Key: Name
-          Value: !Sub "${AWS::StackName}-db-subnet-group"
+      DBSubnetGroupName: !Sub '${AWS::StackName}-subnet-group'
+      DBSubnetGroupDescription: DB subnet group for Aurora
+      SubnetIds: !Split [',', !ImportValue 'network-stack-DBSubnets']
 
-  # ============================================================
-  # RDS PARAMETER GROUP
-  # ============================================================
-  DBParameterGroup:
-    Type: AWS::RDS::DBParameterGroup
-    Properties:
-      Description: Custom PostgreSQL parameters
-      Family: aurora-postgresql15
-      Parameters:
-        shared_preload_libraries: pg_stat_statements
-        log_min_duration_statement: "1000"    # Log queries > 1s
-        log_connections: "1"
-        log_disconnections: "1"
-
-  # ============================================================
-  # AURORA POSTGRESQL CLUSTER
-  # ============================================================
+  # ── Aurora Cluster ────────────────────────────────────
   AuroraCluster:
     Type: AWS::RDS::DBCluster
-    DeletionPolicy: !If [IsProd, Snapshot, Delete]
+    DeletionPolicy: Snapshot    # Take final snapshot before deletion
     UpdateReplacePolicy: Snapshot
     Properties:
-      DBClusterIdentifier: !Sub "${AWS::StackName}-cluster"
+      DBClusterIdentifier: !Sub '${AWS::StackName}-aurora'
       Engine: aurora-postgresql
-      EngineVersion: "15.3"
-      DatabaseName: !Ref DBName
-      MasterUsername: !Ref DBUsername
-      MasterUserPassword: !Ref DBPassword
+      EngineVersion: "15.4"
+      DatabaseName: appdb
+      MasterUsername: dbadmin
+      ManageMasterUserPassword: true    # AWS manages rotation in Secrets Manager
+      # MasterUserPassword: !Ref DBMasterPassword  # Alternative: manual password
+      DBClusterParameterGroupName: !Ref DBParameterGroup
       DBSubnetGroupName: !Ref DBSubnetGroup
       VpcSecurityGroupIds:
         - !Ref DBSecurityGroup
-      
-      # Backup
-      BackupRetentionPeriod: !If [IsProd, 7, 1]
-      PreferredBackupWindow: "03:00-04:00"
-      PreferredMaintenanceWindow: "sun:04:00-sun:05:00"
-      
-      # Encryption
       StorageEncrypted: true
-      
-      # Point-in-time recovery
+      KmsKeyId: !GetAtt DBKMSKey.Arn
+      BackupRetentionPeriod: !If [IsProd, 35, 7]
+      PreferredBackupWindow: "02:00-03:00"
+      PreferredMaintenanceWindow: "sun:04:00-sun:05:00"
+      DeletionProtection: !If [IsProd, true, false]
       EnableCloudwatchLogsExports:
         - postgresql
-      
-      # Deletion protection
-      DeletionProtection: !If [IsProd, true, false]
-      
-      Tags:
-        - Key: Environment
-          Value: !Ref Environment
+        - upgrade
+      EnableIAMDatabaseAuthentication: true    # Login with IAM credentials
+      CopyTagsToSnapshot: true
+      ServerlessV2ScalingConfiguration: !If
+        - IsProd
+        - !Ref AWS::NoValue
+        - MinCapacity: 0.5    # For non-prod, use Serverless v2
+          MaxCapacity: 8.0
 
-  # PRIMARY INSTANCE
+  # ── Primary Instance ──────────────────────────────────
   AuroraPrimaryInstance:
     Type: AWS::RDS::DBInstance
     Properties:
+      DBInstanceIdentifier: !Sub '${AWS::StackName}-aurora-primary'
       DBClusterIdentifier: !Ref AuroraCluster
-      DBInstanceClass: !Ref DBInstanceClass
+      DBInstanceClass: !If [IsProd, !Ref DBInstanceClass, db.serverless]
       Engine: aurora-postgresql
-      DBParameterGroupName: !Ref DBParameterGroup
       AutoMinorVersionUpgrade: true
       PubliclyAccessible: false
-      Tags:
-        - Key: Name
-          Value: !Sub "${AWS::StackName}-primary"
+      MonitoringInterval: !If [IsProd, 60, 0]    # Enhanced monitoring (every 60s)
+      MonitoringRoleArn: !If
+        - IsProd
+        - !GetAtt RDSMonitoringRole.Arn
+        - !Ref AWS::NoValue
+      EnablePerformanceInsights: !If [IsProd, true, false]
+      PerformanceInsightsRetentionPeriod: !If [IsProd, 7, !Ref AWS::NoValue]
+      PerformanceInsightsKMSKeyId: !If [IsProd, !Ref DBKMSKey, !Ref AWS::NoValue]
 
-  # REPLICA INSTANCE (prod only)
-  AuroraReplicaInstance:
+  # ── Read Replica ──────────────────────────────────────
+  AuroraReadReplica:
     Type: AWS::RDS::DBInstance
     Condition: IsProd
     Properties:
+      DBInstanceIdentifier: !Sub '${AWS::StackName}-aurora-reader'
       DBClusterIdentifier: !Ref AuroraCluster
       DBInstanceClass: !Ref DBInstanceClass
       Engine: aurora-postgresql
       AutoMinorVersionUpgrade: true
       PubliclyAccessible: false
-      Tags:
-        - Key: Name
-          Value: !Sub "${AWS::StackName}-replica"
 
-  # ============================================================
-  # DYNAMODB TABLE
-  # ============================================================
-  SessionsTable:
-    Type: AWS::DynamoDB::Table
-    DeletionPolicy: !If [IsProd, Retain, Delete]
+  # ── RDS Proxy (connection pooling) ───────────────────
+  RDSProxy:
+    Type: AWS::RDS::DBProxy
+    Condition: IsProd
     Properties:
-      TableName: !Sub "${AWS::StackName}-sessions"
-      BillingMode: PAY_PER_REQUEST
-      
+      DBProxyName: !Sub '${AWS::StackName}-proxy'
+      EngineFamily: POSTGRESQL
+      RoleArn: !GetAtt RDSProxyRole.Arn
+      Auth:
+        - AuthScheme: SECRETS
+          SecretArn: !GetAtt AuroraCluster.MasterUserSecret.SecretArn
+          IAMAuth: REQUIRED
+      VpcSubnetIds: !Split [',', !ImportValue 'network-stack-PrivateSubnets']
+      VpcSecurityGroupIds:
+        - !Ref DBSecurityGroup
+      MaxConnectionsPercent: 90
+      MaxIdleConnectionsPercent: 50
+      ConnectionBorrowTimeout: 120
+      RequireTLS: true
+
+  RDSProxyTargetGroup:
+    Type: AWS::RDS::DBProxyTargetGroup
+    Condition: IsProd
+    DependsOn: RDSProxy
+    Properties:
+      DBProxyName: !Ref RDSProxy
+      TargetGroupName: default
+      DBClusterIdentifiers:
+        - !Ref AuroraCluster
+      ConnectionPoolConfigurationInfo:
+        MaxConnectionsPercent: 90
+        MaxIdleConnectionsPercent: 50
+```
+
+---
+
+## 7.2 DynamoDB Table
+
+```yaml
+  # ── DynamoDB Table ─────────────────────────────────────
+  OrdersTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    Properties:
+      TableName: !Sub '${AWS::StackName}-orders'
+      BillingMode: PAY_PER_REQUEST    # Serverless, no capacity planning
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true    # 35-day PITR
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !GetAtt DBKMSKey.Arn
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES   # For Lambda triggers
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
       AttributeDefinitions:
-        - AttributeName: sessionId
+        - AttributeName: pk          # Partition key: "ORDER#orderId" or "USER#userId"
           AttributeType: S
-        - AttributeName: userId
+        - AttributeName: sk          # Sort key: "ORDER#orderId" or "ITEM#itemId"
           AttributeType: S
-        - AttributeName: createdAt
+        - AttributeName: gsi1pk      # GSI: status + date
           AttributeType: S
-      
+        - AttributeName: gsi1sk
+          AttributeType: S
+        - AttributeName: user_id     # GSI: query by user
+          AttributeType: S
       KeySchema:
-        - AttributeName: sessionId
+        - AttributeName: pk
           KeyType: HASH
-      
+        - AttributeName: sk
+          KeyType: RANGE
       GlobalSecondaryIndexes:
-        - IndexName: userId-createdAt-index
+        - IndexName: gsi1-status-date
           KeySchema:
-            - AttributeName: userId
+            - AttributeName: gsi1pk
               KeyType: HASH
-            - AttributeName: createdAt
+            - AttributeName: gsi1sk
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: gsi2-user-orders
+          KeySchema:
+            - AttributeName: user_id
+              KeyType: HASH
+            - AttributeName: pk
               KeyType: RANGE
           Projection:
             ProjectionType: INCLUDE
             NonKeyAttributes:
-              - sessionId
-              - isValid
-              - expiresAt
-      
-      TimeToLiveSpecification:
-        AttributeName: expiresAt
-        Enabled: true
-      
-      PointInTimeRecoverySpecification:
-        PointInTimeRecoveryEnabled: !If [IsProd, true, false]
-      
-      SSESpecification:
-        SSEEnabled: true
-      
+              - status
+              - total_amount
+              - created_at
       Tags:
         - Key: Environment
           Value: !Ref Environment
 
-  # ============================================================
-  # ELASTICACHE — REDIS
-  # ============================================================
+  # ── DynamoDB Auto Scaling (if using PROVISIONED mode) ─
+  # Uncomment if switching to PROVISIONED for predictable workloads
+  # TableReadScalingTarget:
+  #   Type: AWS::ApplicationAutoScaling::ScalableTarget
+  #   Properties:
+  #     ServiceNamespace: dynamodb
+  #     ResourceId: !Sub 'table/${OrdersTable}'
+  #     ScalableDimension: dynamodb:table:ReadCapacityUnits
+  #     MinCapacity: 5
+  #     MaxCapacity: 1000
+```
+
+---
+
+## 7.3 ElastiCache Redis
+
+```yaml
+  # ── ElastiCache Security Group ────────────────────────
   CacheSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: ElastiCache Redis security group
-      VpcId: !ImportValue
-        Fn::Sub: "${NetworkingStack}-VpcId"
+      VpcId: !ImportValue 'network-stack-VpcId'
       SecurityGroupIngress:
         - IpProtocol: tcp
           FromPort: 6379
           ToPort: 6379
-          CidrIp: !ImportValue
-            Fn::Sub: "${NetworkingStack}-VpcCidr"
+          SourceSecurityGroupId: !ImportValue 'app-stack-AppSecurityGroupId'
+          Description: Redis from app tier
 
+  # ── Cache Subnet Group ────────────────────────────────
   CacheSubnetGroup:
     Type: AWS::ElastiCache::SubnetGroup
     Properties:
-      Description: ElastiCache subnet group
-      SubnetIds:
-        - !Select
-          - 0
-          - !Split
-            - ","
-            - !ImportValue
-              Fn::Sub: "${NetworkingStack}-PrivateSubnets"
-        - !Select
-          - 1
-          - !Split
-            - ","
-            - !ImportValue
-              Fn::Sub: "${NetworkingStack}-PrivateSubnets"
+      CacheSubnetGroupName: !Sub '${AWS::StackName}-cache-subnet'
+      Description: Subnet group for ElastiCache
+      SubnetIds: !Split [',', !ImportValue 'network-stack-PrivateSubnets']
 
+  # ── Redis Parameter Group ─────────────────────────────
   CacheParameterGroup:
     Type: AWS::ElastiCache::ParameterGroup
     Properties:
-      Description: Redis parameters
       CacheParameterGroupFamily: redis7
+      Description: Redis 7 parameter group
       Properties:
-        maxmemory-policy: allkeys-lru
-        notify-keyspace-events: ""
+        maxmemory-policy: allkeys-lru      # Evict LRU keys when full
+        activerehashing: "yes"
+        notify-keyspace-events: "Ex"       # Keyspace events for TTL expiry
+        timeout: "300"                     # Close idle connections after 5 min
 
-  # REDIS REPLICATION GROUP (Multi-AZ in prod)
-  RedisReplicationGroup:
+  # ── Redis Replication Group ───────────────────────────
+  RedisCluster:
     Type: AWS::ElastiCache::ReplicationGroup
     Properties:
-      ReplicationGroupDescription: !Sub "${AWS::StackName} Redis cache"
-      AutomaticFailoverEnabled: !If [IsProd, true, false]
-      MultiAZEnabled: !If [IsProd, true, false]
-      NumCacheClusters: !If [IsProd, 2, 1]
-      CacheNodeType: !If [IsProd, cache.r6g.large, cache.t3.micro]
+      ReplicationGroupId: !Sub '${AWS::StackName}-redis'
+      ReplicationGroupDescription: Redis cluster for caching and sessions
       Engine: redis
-      EngineVersion: "7.0"
+      EngineVersion: "7.1"
+      CacheNodeType: !If [IsProd, cache.r7g.medium, cache.t4g.micro]
+      NumCacheClusters: !If [IsProd, 3, 1]    # Multi-AZ for prod
       CacheParameterGroupName: !Ref CacheParameterGroup
       CacheSubnetGroupName: !Ref CacheSubnetGroup
       SecurityGroupIds:
         - !Ref CacheSecurityGroup
+      MultiAZEnabled: !If [IsProd, true, false]
+      AutomaticFailoverEnabled: !If [IsProd, true, false]
       AtRestEncryptionEnabled: true
       TransitEncryptionEnabled: true
+      TransitEncryptionMode: required
+      AuthToken: !If
+        - IsProd
+        - !Sub '{{resolve:secretsmanager:${AWS::StackName}/redis-auth-token}}'
+        - !Ref AWS::NoValue
+      SnapshotRetentionLimit: !If [IsProd, 7, 1]
+      SnapshotWindow: "03:00-04:00"
+      PreferredMaintenanceWindow: "sun:05:00-sun:06:00"
       Tags:
         - Key: Environment
           Value: !Ref Environment
 
-# ============================================================
-# OUTPUTS
-# ============================================================
 Outputs:
-  DBClusterEndpoint:
-    Description: Aurora cluster write endpoint
+  AuroraClusterEndpoint:
     Value: !GetAtt AuroraCluster.Endpoint.Address
     Export:
-      Name: !Sub "${AWS::StackName}-DBEndpoint"
+      Name: !Sub '${AWS::StackName}-DBEndpoint'
 
-  DBClusterReadEndpoint:
-    Description: Aurora cluster read endpoint
+  AuroraReaderEndpoint:
     Value: !GetAtt AuroraCluster.ReadEndpoint.Address
     Export:
-      Name: !Sub "${AWS::StackName}-DBReadEndpoint"
+      Name: !Sub '${AWS::StackName}-DBReaderEndpoint'
 
-  DBPort:
-    Value: !GetAtt AuroraCluster.Endpoint.Port
+  RDSProxyEndpoint:
+    Condition: IsProd
+    Value: !GetAtt RDSProxy.Endpoint
     Export:
-      Name: !Sub "${AWS::StackName}-DBPort"
+      Name: !Sub '${AWS::StackName}-DBProxyEndpoint'
 
-  SessionsTableName:
-    Value: !Ref SessionsTable
+  OrdersTableName:
+    Value: !Ref OrdersTable
     Export:
-      Name: !Sub "${AWS::StackName}-SessionsTable"
+      Name: !Sub '${AWS::StackName}-OrdersTableName'
 
-  RedisEndpoint:
-    Value: !GetAtt RedisReplicationGroup.PrimaryEndPoint.Address
+  RedisPrimaryEndpoint:
+    Value: !GetAtt RedisCluster.PrimaryEndPoint.Address
     Export:
-      Name: !Sub "${AWS::StackName}-RedisEndpoint"
-
-  RedisPort:
-    Value: !GetAtt RedisReplicationGroup.PrimaryEndPoint.Port
-    Export:
-      Name: !Sub "${AWS::StackName}-RedisPort"
+      Name: !Sub '${AWS::StackName}-RedisEndpoint'
 ```
 
 ---
 
-## 7.2 Deploying the Database Stack
+## 7.4 Interview Q&A
 
-```bash
-# Deploy (dev — no read replica, minimal Redis)
-aws cloudformation deploy \
-  --template-file databases.yaml \
-  --stack-name myapp-databases-dev \
-  --parameter-overrides \
-    Environment=dev \
-    NetworkingStack=myapp-networking \
-    DBPassword=DevPassword123! \
-    DBInstanceClass=db.t3.micro \
-  --capabilities CAPABILITY_IAM \
-  --region us-east-1
+**Q: What is `ManageMasterUserPassword` in Aurora and why use it?**
+A: When `ManageMasterUserPassword: true`, AWS automatically creates and manages the master user password in AWS Secrets Manager, including auto-rotation every 7 days by default. This means: no need to pass a password as a parameter (no risk of it being logged), automatic rotation reduces credential exposure, the secret ARN is available as `!GetAtt AuroraCluster.MasterUserSecret.SecretArn`. Use this for new Aurora/RDS clusters instead of `MasterUserPassword` parameter with `NoEcho`.
 
-# Deploy (prod — with replica and Multi-AZ Redis)
-aws cloudformation deploy \
-  --template-file databases.yaml \
-  --stack-name myapp-databases-prod \
-  --parameter-overrides \
-    Environment=prod \
-    NetworkingStack=myapp-networking-prod \
-    DBPassword=ProdPassword456! \
-    DBInstanceClass=db.r6g.large \
-  --capabilities CAPABILITY_IAM \
-  --region us-east-1
+**Q: What is the DynamoDB single-table design and why would you use it in CloudFormation?**
+A: Single-table design stores multiple entity types in one DynamoDB table using generic PK/SK naming (pk, sk) with prefixes like "USER#userId" or "ORDER#orderId". In CloudFormation, this means one table handles all data access patterns. Benefits: fewer DynamoDB tables to manage, atomic transactions across entity types, fewer API calls for related data. The GSIs enable different access patterns without relying on table scans. Define GSI projections carefully — `KEYS_ONLY` and `INCLUDE` are cheaper than `ALL` (which duplicates data in GSIs).
 
-# Get DB endpoint
-aws cloudformation describe-stacks \
-  --stack-name myapp-databases-dev \
-  --query "Stacks[0].Outputs[?OutputKey=='DBClusterEndpoint'].OutputValue" \
-  --output text
-```
-
----
-
-## 7.3 Secrets Manager — Store DB Password in CloudFormation
-
-```yaml
-# Better approach: use Secrets Manager to auto-generate password
-DBSecret:
-  Type: AWS::SecretsManager::Secret
-  Properties:
-    Name: !Sub "${AWS::StackName}/db-credentials"
-    Description: Database credentials
-    GenerateSecretString:
-      SecretStringTemplate: !Sub '{"username": "${DBUsername}"}'
-      GenerateStringKey: password
-      PasswordLength: 32
-      ExcludePunctuation: true
-
-AuroraCluster:
-  Type: AWS::RDS::DBCluster
-  Properties:
-    MasterUsername: !Sub "{{resolve:secretsmanager:${DBSecret}:SecretString:username}}"
-    MasterUserPassword: !Sub "{{resolve:secretsmanager:${DBSecret}:SecretString:password}}"
-
-# Attach secret to RDS (enables secret rotation)
-SecretAttachment:
-  Type: AWS::SecretsManager::SecretTargetAttachment
-  Properties:
-    SecretId: !Ref DBSecret
-    TargetId: !Ref AuroraCluster
-    TargetType: AWS::RDS::DBCluster
-```
-
----
-
-## 7.4 Interview Questions
-
-**Q: What is the difference between `DeletionPolicy: Delete` and `DeletionPolicy: Snapshot` for RDS?**
-> `Delete` permanently removes the RDS instance when the stack is deleted — all data is gone, no recovery. `Snapshot` takes a final automated snapshot before deleting the instance, so you can restore the database later. For production, always use `Snapshot` combined with `DeletionProtection: true` to prevent accidental deletion. The snapshot is stored in RDS and can be used to create a new cluster. Also set `UpdateReplacePolicy: Snapshot` to snapshot the old instance when it needs to be replaced during an update.
-
-**Q: How do you handle database passwords securely in CloudFormation?**
-> Best practice: don't pass the password as a plain parameter. Instead, create a `AWS::SecretsManager::Secret` resource with `GenerateSecretString` to have Secrets Manager generate a random password. Reference it in the RDS resource using `{{resolve:secretsmanager:SecretArn:SecretString:password}}`. Then attach the secret with `SecretTargetAttachment` to enable automatic rotation. Lambda and ECS tasks retrieve the secret at runtime via `secretsmanager:GetSecretValue`, never seeing it in the template or CloudFormation console.
-
-**Q: Why is `TimeToLiveSpecification` important for DynamoDB session tables?**
-> TTL automatically deletes items when the Unix timestamp in the `expiresAt` attribute passes. Without TTL, sessions accumulate indefinitely — a table with millions of expired sessions wastes storage, increases scan costs, and degrades query performance. TTL deletions are free and happen within 48 hours of expiry. Always use TTL for anything time-bounded: sessions, cache records, one-time tokens, temporary locks. Set the attribute to a Unix epoch timestamp when writing the item.
+**Q: What is DeletionPolicy: Snapshot vs Retain for RDS?**
+A: `DeletionPolicy: Snapshot` takes a final DB snapshot before deleting the stack — you can restore from it later. The snapshot persists and incurs storage costs. `DeletionPolicy: Retain` skips deletion and leaves the DB running (costs continue). `Delete` immediately destroys the DB with no recovery option. For production RDS/Aurora, always use `Snapshot` — it protects against accidental stack deletion while eventually allowing cost cleanup (delete the snapshot when no longer needed). Also set `DeletionProtection: true` on the Aurora cluster as a defense-in-depth measure.

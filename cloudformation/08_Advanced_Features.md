@@ -1,353 +1,444 @@
-# Chapter 8: Advanced Features
-## Nested Stacks, Cross-Stack References, Custom Resources & StackSets
+# CloudFormation Chapter 8: Advanced Features
+## Nested Stacks, StackSets, Custom Resources, Macros & Drift Detection
 
 ---
 
-## 8.1 Cross-Stack References
-
-Cross-stack references let stacks share values without being nested. One stack exports a value; another imports it.
+## 8.1 Nested Stacks — Modular Infrastructure
 
 ```yaml
-# networking-stack.yaml — EXPORTS values
-Outputs:
-  VpcId:
-    Value: !Ref VPC
-    Export:
-      Name: !Sub "${AWS::StackName}-VpcId"   # Export name must be unique per region/account
-
-  PrivateSubnets:
-    Value: !Join [",", [!Ref PrivateSubnet1, !Ref PrivateSubnet2]]
-    Export:
-      Name: !Sub "${AWS::StackName}-PrivateSubnets"
-```
-
-```yaml
-# app-stack.yaml — IMPORTS values
-Parameters:
-  NetworkingStack:
-    Type: String
-    Default: myapp-networking
-
-Resources:
-  MySecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      VpcId: !ImportValue
-        Fn::Sub: "${NetworkingStack}-VpcId"   # Import by export name
-```
-
-```bash
-# View all exports in a region
-aws cloudformation list-exports \
-  --query "Exports[*].[Name,Value]"
-
-# IMPORTANT: Cannot delete a stack that has values imported by another stack
-# You must delete the importing stack first
-```
-
----
-
-## 8.2 Nested Stacks
-
-Nested stacks allow you to decompose a large template into reusable modules. A parent stack creates child stacks as resources.
-
-```
-parent-stack.yaml
-├── networking-stack.yaml   (reusable VPC module)
-├── databases-stack.yaml    (reusable DB module)
-└── app-stack.yaml          (application, depends on above)
-```
-
-```yaml
-# parent-stack.yaml — creates child stacks
-AWSTemplateFormatVersion: "2010-09-09"
-Description: Parent stack — orchestrates child stacks
+# root-stack.yaml — Master stack that composes nested stacks
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Root stack composing network, security, app, and data stacks
 
 Parameters:
   Environment:
     Type: String
-    Default: prod
+    AllowedValues: [dev, staging, prod]
+  
+  ProjectName:
+    Type: String
+    Default: myapp
+  
+  TemplatesBucket:
+    Type: String
+    Description: S3 bucket containing nested stack templates
 
 Resources:
-
-  # Upload child templates to S3 first, then reference them
-  NetworkingStack:
+  # ── Network Stack (VPC, Subnets, NAT) ─────────────────
+  NetworkStack:
     Type: AWS::CloudFormation::Stack
     Properties:
-      TemplateURL: !Sub "https://s3.amazonaws.com/my-templates/networking.yaml"
+      TemplateURL: !Sub 'https://${TemplatesBucket}.s3.${AWS::Region}.amazonaws.com/templates/vpc.yaml'
       Parameters:
         Environment: !Ref Environment
+        ProjectName: !Ref ProjectName
         VpcCidr: 10.0.0.0/16
-        EnableNatGateway: "true"
+        EnableNatGateway: !If [IsProd, true, true]
+        NatGatewayCount: !If [IsProd, 3, 1]
       TimeoutInMinutes: 30
       Tags:
-        - Key: ParentStack
-          Value: !Ref AWS::StackName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Layer
+          Value: network
 
-  DatabaseStack:
+  # ── Security Stack (KMS, Security Groups, WAF) ────────
+  SecurityStack:
     Type: AWS::CloudFormation::Stack
-    DependsOn: NetworkingStack
+    DependsOn: NetworkStack
     Properties:
-      TemplateURL: !Sub "https://s3.amazonaws.com/my-templates/databases.yaml"
+      TemplateURL: !Sub 'https://${TemplatesBucket}.s3.${AWS::Region}.amazonaws.com/templates/security.yaml'
       Parameters:
         Environment: !Ref Environment
-        NetworkingStack: !GetAtt NetworkingStack.Outputs.StackName
-        DBPassword: !Sub "{{resolve:secretsmanager:${AWS::StackName}/db-password}}"
-      TimeoutInMinutes: 45
+        NetworkStackName: !GetAtt NetworkStack.Outputs.StackName
+        VpcId: !GetAtt NetworkStack.Outputs.VpcId
 
+  # ── Data Stack (Aurora, DynamoDB, ElastiCache) ────────
+  DataStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn:
+      - NetworkStack
+      - SecurityStack
+    Properties:
+      TemplateURL: !Sub 'https://${TemplatesBucket}.s3.${AWS::Region}.amazonaws.com/templates/databases.yaml'
+      Parameters:
+        Environment: !Ref Environment
+        NetworkStackName: !GetAtt NetworkStack.Outputs.StackName
+        SecurityStackName: !GetAtt SecurityStack.Outputs.StackName
+
+  # ── Application Stack (ECS, Lambda, API GW) ──────────
   AppStack:
     Type: AWS::CloudFormation::Stack
     DependsOn:
-      - NetworkingStack
-      - DatabaseStack
+      - DataStack
     Properties:
-      TemplateURL: !Sub "https://s3.amazonaws.com/my-templates/app.yaml"
+      TemplateURL: !Sub 'https://${TemplatesBucket}.s3.${AWS::Region}.amazonaws.com/templates/app.yaml'
       Parameters:
         Environment: !Ref Environment
-        NetworkingStack: !GetAtt NetworkingStack.Outputs.StackName
-        DatabaseStack: !GetAtt DatabaseStack.Outputs.StackName
-      TimeoutInMinutes: 20
+        NetworkStackName: !GetAtt NetworkStack.Outputs.StackName
+        DataStackName: !GetAtt DataStack.Outputs.StackName
+        ImageUri: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/myapp:latest'
 
 Outputs:
-  AppUrl:
-    Value: !GetAtt AppStack.Outputs.ServiceUrl
-```
+  ApiEndpoint:
+    Description: API endpoint URL
+    Value: !GetAtt AppStack.Outputs.ApiEndpoint
 
-```bash
-# Upload templates to S3
-aws s3 sync ./templates s3://my-templates/ --exclude "*" --include "*.yaml"
-
-# Package templates (resolves local file references to S3 URLs automatically)
-aws cloudformation package \
-  --template-file parent-stack.yaml \
-  --s3-bucket my-templates \
-  --output-template-file packaged.yaml
-
-# Deploy packaged template
-aws cloudformation deploy \
-  --template-file packaged.yaml \
-  --stack-name myapp-prod \
-  --parameter-overrides Environment=prod \
-  --capabilities CAPABILITY_NAMED_IAM
+  NetworkStackId:
+    Value: !Ref NetworkStack
 ```
 
 ---
 
-## 8.3 Custom Resources — Lambda-Backed
+## 8.2 StackSets — Multi-Account/Region Deployment
 
-Custom Resources let you execute arbitrary code during stack operations using a Lambda function. Useful for:
-- Provisioning resources CloudFormation doesn't support natively
-- Sending notifications
-- Copying S3 data during stack creation
-- Looking up values from external systems
+```yaml
+# stackset.yaml — Deploy security baseline across organization
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Deploy CloudTrail and Config to all organization accounts
+
+Resources:
+  SecurityBaselineStackSet:
+    Type: AWS::CloudFormation::StackSet
+    Properties:
+      StackSetName: security-baseline
+      Description: Security baseline — CloudTrail, Config, GuardDuty
+      PermissionModel: SERVICE_MANAGED    # Uses Organizations service role
+      OrganizationalUnitIds:
+        - !Ref ProductionOUId
+        - !Ref StagingOUId
+      AutoDeployment:
+        Enabled: true    # Auto-deploy to new accounts in these OUs
+        RetainStacksOnAccountRemoval: false
+      ManagedExecution:
+        Active: true     # Concurrent deployments (faster)
+      DeploymentTargets:
+        OrganizationalUnitIds:
+          - ou-abc-12345678
+      StackInstancesGroup:
+        - DeploymentTargets:
+            OrganizationalUnitIds:
+              - ou-abc-12345678
+          Regions:
+            - us-east-1
+            - eu-west-1
+            - ap-southeast-1
+      OperationPreferences:
+        MaxConcurrentPercentage: 50      # Deploy to 50% of accounts at once
+        FailureTolerancePercentage: 20   # Allow 20% failures before stopping
+        RegionConcurrencyType: PARALLEL  # Deploy to all regions concurrently
+      TemplateBody: |
+        AWSTemplateFormatVersion: '2010-09-09'
+        Resources:
+          CloudTrail:
+            Type: AWS::CloudTrail::Trail
+            Properties:
+              IsLogging: true
+              IsMultiRegionTrail: true
+              EnableLogFileValidation: true
+              S3BucketName: central-cloudtrail-logs
+          
+          GuardDutyDetector:
+            Type: AWS::GuardDuty::Detector
+            Properties:
+              Enable: true
+              FindingPublishingFrequency: FIFTEEN_MINUTES
+```
+
+---
+
+## 8.3 Custom Resources — Extend CloudFormation
+
+Custom Resources let you run any code during stack operations.
 
 ```yaml
 # custom-resource-example.yaml
 Resources:
-
-  # Lambda function that handles custom resource lifecycle
-  DatabaseInitFunction:
+  # ── Custom Resource Lambda ────────────────────────────
+  CustomResourceFunction:
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: !Sub "${AWS::StackName}-db-init"
-      Runtime: python3.12
+      FunctionName: !Sub '${AWS::StackName}-custom-resource'
+      Runtime: python3.11
       Handler: index.handler
-      Role: !GetAtt LambdaRole.Arn
+      Role: !GetAtt CustomResourceRole.Arn
       Timeout: 300
       Code:
         ZipFile: |
-          import json, urllib.request, urllib.error
-          
-          def send_response(event, context, status, data=None, reason=""):
-              """Send response back to CloudFormation."""
-              body = json.dumps({
-                  "Status": status,
-                  "Reason": reason,
-                  "PhysicalResourceId": event.get("PhysicalResourceId", context.log_stream_name),
-                  "StackId": event["StackId"],
-                  "RequestId": event["RequestId"],
-                  "LogicalResourceId": event["LogicalResourceId"],
-                  "Data": data or {}
-              })
-              
-              req = urllib.request.Request(
-                  event["ResponseURL"],
-                  data=body.encode(),
-                  method="PUT",
-                  headers={"Content-Type": "application/json"}
-              )
-              urllib.request.urlopen(req)
+          import boto3
+          import json
+          import cfnresponse
           
           def handler(event, context):
-              request_type = event["RequestType"]
-              props = event["ResourceProperties"]
+              request_type = event['RequestType']
+              resource_properties = event['ResourceProperties']
               
               try:
-                  if request_type == "Create":
-                      # Run DB migrations, seed data, etc.
-                      result = run_migrations(props["DBEndpoint"])
-                      send_response(event, context, "SUCCESS", {"Result": result})
+                  if request_type == 'Create':
+                      result = create_resource(resource_properties)
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, 
+                                       result, physical_resource_id=result['Id'])
                   
-                  elif request_type == "Update":
-                      # Handle updates
-                      send_response(event, context, "SUCCESS")
+                  elif request_type == 'Update':
+                      result = update_resource(resource_properties, 
+                                               event['OldResourceProperties'])
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, 
+                                       result, physical_resource_id=event['PhysicalResourceId'])
                   
-                  elif request_type == "Delete":
-                      # Cleanup if needed
-                      send_response(event, context, "SUCCESS")
+                  elif request_type == 'Delete':
+                      delete_resource(event['PhysicalResourceId'])
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
               
               except Exception as e:
-                  send_response(event, context, "FAILED", reason=str(e))
+                  print(f"Error: {e}")
+                  cfnresponse.send(event, context, cfnresponse.FAILED,
+                                   {'Error': str(e)})
           
-          def run_migrations(db_endpoint):
-              # Actually run your migrations here
-              return "Migrations completed"
+          def create_resource(props):
+              # Example: create Cognito user pool domain
+              client = boto3.client('cognito-idp')
+              client.create_user_pool_domain(
+                  Domain=props['DomainPrefix'],
+                  UserPoolId=props['UserPoolId']
+              )
+              return {'Id': props['DomainPrefix'], 'Domain': f"{props['DomainPrefix']}.auth.us-east-1.amazoncognito.com"}
+          
+          def delete_resource(physical_id):
+              client = boto3.client('cognito-idp')
+              # Delete the domain — need to look up UserPoolId
+              pass
 
-  # The custom resource — CloudFormation calls the Lambda on Create/Update/Delete
-  DatabaseInit:
-    Type: AWS::CloudFormation::CustomResource
+  # ── Custom Resource Usage ─────────────────────────────
+  CognitoUserPoolDomain:
+    Type: Custom::CognitoUserPoolDomain
     Properties:
-      ServiceToken: !GetAtt DatabaseInitFunction.Arn
-      DBEndpoint: !ImportValue "databases-stack-DBEndpoint"
-      Environment: !Ref Environment
-      # Changes to these properties trigger a resource Update
-      MigrationVersion: "v1.2.3"
+      ServiceToken: !GetAtt CustomResourceFunction.Arn
+      DomainPrefix: !Sub '${ProjectName}-${Environment}'
+      UserPoolId: !Ref UserPool
+
+  # ── Use Custom Resource Output ────────────────────────
+  CognitoHostedUI:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/app/${Environment}/auth-domain'
+      Type: String
+      Value: !GetAtt CognitoUserPoolDomain.Domain
+```
+
+### AWS CDK Custom Resource (simpler approach)
+
+```python
+# In CDK, use AwsCustomResource for simple SDK calls
+from aws_cdk import custom_resources as cr
+
+# Example: enable a feature that CloudFormation doesn't support natively
+custom_resource = cr.AwsCustomResource(
+    self, "EnableAdvancedSecurity",
+    on_create=cr.AwsSdkCall(
+        service="wafv2",
+        action="updateWebACL",
+        parameters={
+            "Name": "my-web-acl",
+            "Scope": "REGIONAL",
+            "Id": web_acl.attr_id,
+            "LockToken": web_acl.attr_lock_token,
+            "DefaultAction": {"Allow": {}},
+            "VisibilityConfig": {"..."}
+        },
+        physical_resource_id=cr.PhysicalResourceId.of("waf-advanced-config")
+    ),
+    policy=cr.AwsCustomResourcePolicy.from_sdk_calls(
+        resources=cr.AwsCustomResourcePolicy.ANY_RESOURCE
+    )
+)
 ```
 
 ---
 
-## 8.4 Dynamic References
-
-Dynamic references let you pull values from SSM Parameter Store or Secrets Manager directly in templates, without passing them as parameters.
+## 8.4 CloudFormation Macros — Transform Templates
 
 ```yaml
+# macro-lambda.yaml — A CloudFormation macro
 Resources:
-  MyInstance:
-    Type: AWS::EC2::Instance
+  MacroFunction:
+    Type: AWS::Lambda::Function
     Properties:
-      # Pull from SSM Parameter Store
-      ImageId: "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}"
-      InstanceType: "{{resolve:ssm:/myapp/prod/instance-type}}"
-      
-      # Pull encrypted SSM parameter
-      # {{resolve:ssm-secure:/myapp/prod/db-password}}
-      
-      # Pull from Secrets Manager
-      UserData:
-        !Base64
-          !Sub |
-            #!/bin/bash
-            export DB_PASS='{{resolve:secretsmanager:${AWS::StackName}/db:SecretString:password}}'
-            export API_KEY='{{resolve:secretsmanager:${AWS::StackName}/api:SecretString:key}}'
+      FunctionName: MyOrg-CommonTags
+      Runtime: python3.11
+      Handler: index.handler
+      Code:
+        ZipFile: |
+          def handler(event, context):
+              """Add standard tags to all resources that support tagging."""
+              fragment = event['fragment']
+              params = event['templateParameterValues']
+              
+              standard_tags = {
+                  'ManagedBy': 'CloudFormation',
+                  'StackName': params.get('AWS::StackName', 'unknown'),
+                  'Environment': params.get('Environment', 'unknown'),
+                  'LastUpdated': '2025-01-15'
+              }
+              
+              # Add tags to all taggable resources
+              for resource in fragment.get('Resources', {}).values():
+                  props = resource.get('Properties', {})
+                  existing_tags = props.get('Tags', [])
+                  existing_tag_keys = {t.get('Key') for t in existing_tags}
+                  
+                  for key, value in standard_tags.items():
+                      if key not in existing_tag_keys:
+                          existing_tags.append({'Key': key, 'Value': value})
+                  
+                  props['Tags'] = existing_tags
+              
+              return {'requestId': event['requestId'], 'status': 'success', 'fragment': fragment}
+
+  Macro:
+    Type: AWS::CloudFormation::Macro
+    Properties:
+      Name: MyOrg-CommonTags
+      FunctionName: !GetAtt MacroFunction.Arn
+
+# Usage in templates:
+# Transform: MyOrg-CommonTags  ← Applied to entire template
 ```
 
 ---
 
-## 8.5 CloudFormation StackSets
-
-StackSets deploy a single template across multiple accounts and regions simultaneously.
+## 8.5 Drift Detection
 
 ```bash
-# Create StackSet (from management account or delegated admin)
-aws cloudformation create-stack-set \
-  --stack-set-name security-baseline \
-  --template-body file://security-baseline.yaml \
-  --capabilities CAPABILITY_NAMED_IAM \
-  --permission-model SERVICE_MANAGED \
-  --auto-deployment Enabled=true,RetainStacksOnAccountRemoval=false
+# Detect drift across entire stack
+aws cloudformation detect-stack-drift \
+  --stack-name my-production-stack
 
-# Deploy to specific accounts and regions
-aws cloudformation create-stack-instances \
-  --stack-set-name security-baseline \
-  --accounts 111122223333 444455556666 \
-  --regions us-east-1 us-west-2 eu-west-1 \
-  --operation-preferences '{
-    "RegionConcurrencyType": "PARALLEL",
-    "MaxConcurrentPercentage": 50,
-    "FailureTolerancePercentage": 0
-  }'
-
-# Deploy to all accounts in an OU (Organizations integration)
-aws cloudformation create-stack-instances \
-  --stack-set-name security-baseline \
-  --deployment-targets '{"OrganizationalUnitIds": ["ou-xxxx-yyyy"]}' \
-  --regions us-east-1 eu-west-1 \
-  --operation-preferences '{
-    "RegionConcurrencyType": "PARALLEL",
-    "MaxConcurrentCount": 10
-  }'
-
-# Update StackSet (updates all instances)
-aws cloudformation update-stack-set \
-  --stack-set-name security-baseline \
-  --template-body file://security-baseline-v2.yaml \
-  --capabilities CAPABILITY_NAMED_IAM
-
-# View stack instances status
-aws cloudformation list-stack-instances \
-  --stack-set-name security-baseline \
-  --query "Summaries[*].[Account,Region,Status,StatusReason]"
-```
-
----
-
-## 8.6 CloudFormation Macros
-
-Macros are Lambda-backed transform functions that pre-process templates before CloudFormation processes them.
-
-```yaml
-# Using the built-in AWS::Include transform to include a template fragment
-Resources:
-  SecurityGroup:
-    !Transform
-      Name: AWS::Include
-      Parameters:
-        Location: s3://my-templates/security-group-fragment.yaml
-
-# Custom macro example
-Transform: MyCompanyMacro
-
-Resources:
-  MyDatabase:
-    Type: Custom::SecureRDS    # Your macro expands this to full RDS + SG + subnet group
-    Properties:
-      Environment: prod
-      InstanceClass: db.r6g.large
-```
-
----
-
-## 8.7 Drift Detection
-
-```bash
-# Detect drift on a stack (finds resources changed outside CloudFormation)
-aws cloudformation detect-stack-drift --stack-name myapp-prod
-
-# Wait for drift detection to complete (it's async)
+# Check drift status
 aws cloudformation describe-stack-drift-detection-status \
   --stack-drift-detection-id <detection-id>
 
-# View drifted resources
+# Get drifted resources
 aws cloudformation describe-stack-resource-drifts \
-  --stack-name myapp-prod \
+  --stack-name my-production-stack \
   --stack-resource-drift-status-filters MODIFIED DELETED
 
-# Example output for a modified security group:
-# LogicalResourceId: AppSecurityGroup
-# ExpectedProperties: {"GroupDescription": "...", "SecurityGroupIngress": [...]}
-# ActualProperties: {"GroupDescription": "...", "SecurityGroupIngress": [..., {extra_rule}]}
-# PropertyDifferences: [{"PropertyPath": "/SecurityGroupIngress/2", "ChangeType": "ADD"}]
+# Result example:
+# {
+#   "LogicalResourceId": "AppSecurityGroup",
+#   "ResourceType": "AWS::EC2::SecurityGroup",
+#   "StackResourceDriftStatus": "MODIFIED",
+#   "PropertyDifferences": [
+#     {
+#       "PropertyPath": "/SecurityGroupIngress/2",
+#       "ExpectedValue": null,
+#       "ActualValue": "{\"CidrIp\": \"0.0.0.0/0\", \"FromPort\": 22, ...}",
+#       "DifferenceType": "ADD"
+#     }
+#   ]
+# }
+
+# Remediation: remove the manual change and update stack
+# Or: update the template to match reality, then update stack
 ```
 
 ---
 
-## 8.8 Interview Questions
+## 8.6 Stack Policies — Prevent Accidental Updates
 
-**Q: What is the difference between nested stacks and cross-stack references?**
-> Nested stacks create a parent-child hierarchy — the parent stack creates child stacks as resources and can pass outputs between them. Cross-stack references use `Export`/`ImportValue` to share values between completely independent stacks. Nested stacks are tightly coupled (parent must exist for children to exist); cross-stack references are loosely coupled (stacks are independent but cannot be deleted if values are being imported). Use nested stacks for modular decomposition of one logical deployment; use cross-stack references for sharing infrastructure between separate teams or domains.
+```bash
+# Create stack policy preventing deletion of production DB
+aws cloudformation set-stack-policy \
+  --stack-name prod-data-stack \
+  --stack-policy-body '{
+    "Statement": [
+      {
+        "Effect": "Allow",
+        "Principal": "*",
+        "Action": "Update:*",
+        "Resource": "*"
+      },
+      {
+        "Effect": "Deny",
+        "Principal": "*",
+        "Action": ["Update:Replace", "Update:Delete"],
+        "Resource": "LogicalResourceId/AuroraCluster"
+      },
+      {
+        "Effect": "Deny",
+        "Principal": "*",
+        "Action": ["Update:Replace", "Update:Delete"],
+        "Resource": "LogicalResourceId/OrdersTable"
+      }
+    ]
+  }'
 
-**Q: When would you use a Custom Resource?**
-> When CloudFormation doesn't natively support what you need. Common cases: (1) running database migrations after RDS is created; (2) generating an RSA key pair and storing it in Secrets Manager; (3) copying S3 objects between buckets; (4) looking up the latest ECS task definition revision; (5) sending a Slack notification when a stack deploys. The Lambda function receives Create/Update/Delete events with your resource properties and must send a success or failure response to CloudFormation's pre-signed URL. If it times out without responding, the stack waits up to 1 hour then fails.
+# Override policy temporarily for maintenance
+aws cloudformation update-stack \
+  --stack-name prod-data-stack \
+  --template-body file://updated-template.yaml \
+  --stack-policy-during-update-body '{
+    "Statement": [{
+      "Effect": "Allow",
+      "Principal": "*",
+      "Action": "Update:*",
+      "Resource": "*"
+    }]
+  }'
+```
 
-**Q: What is drift detection and how does it help?**
-> Drift detection compares the current actual state of AWS resources against what CloudFormation last deployed. If someone manually added a security group rule, changed an instance type, or deleted a tag through the console, drift detection will show the difference. It helps you: (1) enforce "no manual changes" policies; (2) understand why a stack update failed (resource was modified outside CF); (3) audit infrastructure for compliance. It does NOT automatically fix drift — you either re-deploy the stack to restore the desired state or import the changed resource.
+---
+
+## 8.7 CloudFormation Guard — Policy-as-Code
+
+```
+# guard-rules.guard — Validate templates before deployment
+# Run: cfn-guard validate -d template.yaml -r guard-rules.guard
+
+rule s3_bucket_encrypted {
+    AWS::S3::Bucket {
+        Properties {
+            BucketEncryption exists
+            BucketEncryption.ServerSideEncryptionConfiguration[*].ServerSideEncryptionByDefault.SSEAlgorithm in ["AES256", "aws:kms"]
+        }
+    }
+}
+
+rule s3_block_public_access {
+    AWS::S3::Bucket {
+        Properties.PublicAccessBlockConfiguration {
+            BlockPublicAcls == true
+            BlockPublicPolicy == true
+            IgnorePublicAcls == true
+            RestrictPublicBuckets == true
+        }
+    }
+}
+
+rule rds_encrypted {
+    AWS::RDS::DBInstance {
+        Properties.StorageEncrypted == true
+    }
+    AWS::RDS::DBCluster {
+        Properties.StorageEncrypted == true
+    }
+}
+
+rule no_public_ec2 {
+    AWS::EC2::Instance {
+        Properties.NetworkInterfaces[*].AssociatePublicIpAddress != true
+    }
+}
+```
+
+---
+
+## 8.8 Interview Q&A
+
+**Q: What is the benefit of nested stacks over a single large template?**
+A: Nested stacks solve CloudFormation's 500-resource-per-stack limit, enable reuse (deploy the same VPC template across projects), allow independent lifecycle management (update networking without touching app), enable parallel development by different teams, and improve maintainability. Drawbacks: more complex — root stack must be deployed before nested stacks, S3 hosting required for templates, debugging becomes harder. For small projects, a single stack is simpler. For large enterprise environments, nested stacks are essential.
+
+**Q: When would you use a Custom Resource vs a native CloudFormation resource?**
+A: Use Custom Resources when: (1) a resource type isn't supported by CloudFormation natively (some new AWS services, third-party APIs); (2) you need to perform side effects during deployment (populate data, call external APIs, trigger processes); (3) you need complex validation logic; (4) you need to look up dynamic values not available via SSM. The Lambda function MUST call `cfnresponse.send()` in all code paths (including errors) — failure to respond causes a timeout and stack gets stuck. Always add a `DependsOn` if your custom resource relies on other resources.
+
+**Q: What is CloudFormation Guard (cfn-guard) and why use it?**
+A: cfn-guard is an open-source policy-as-code tool that validates CloudFormation templates against rules before deployment. Rules are written in a DSL that matches template structure. Use in CI/CD pipelines to: enforce encryption standards (all S3 buckets must be encrypted), prevent public resources (no public EC2 IPs, no public S3 ACLs), ensure tagging requirements, validate parameter value ranges. Runs fast (seconds), catches misconfigurations before they reach AWS, works without AWS credentials. Part of a shift-left security strategy.

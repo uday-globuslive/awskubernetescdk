@@ -1,431 +1,243 @@
-# Part VI: Interview Preparation
-## Complete Interview Guide
+# Part 6: Interview Preparation — FastAPI + AWS
 
 ---
 
-# Chapter 34: FastAPI Interview Questions
+## Section 1: FastAPI Deep-Dive Questions
 
-## Beginner Level
+**Q1: How does FastAPI handle request validation, and what happens when validation fails?**
 
-### Q1: What is FastAPI and why use it?
-**Answer:**
-FastAPI is a modern, fast Python web framework for building APIs. Key benefits:
-- **Performance**: One of the fastest Python frameworks (comparable to Node.js/Go)
-- **Type hints**: Uses Python type hints for validation
-- **Auto documentation**: Generates Swagger/OpenAPI docs automatically
-- **Async support**: Built-in async/await support
-- **Pydantic**: Data validation using Pydantic models
+FastAPI uses Pydantic models for request body validation and Python type hints for path/query parameters. When a request arrives: (1) FastAPI extracts data from the request (body, path params, query params, headers); (2) Pydantic validates using field types and validators; (3) If valid, the data is passed to the handler as typed Python objects; (4) If invalid, FastAPI automatically returns a `422 Unprocessable Entity` response with a detailed JSON error body listing all validation errors with their locations and messages.
+
+You can customize the 422 response by registering a `RequestValidationError` exception handler:
 
 ```python
-from fastapi import FastAPI
-from pydantic import BaseModel
-
-app = FastAPI()
-
-class User(BaseModel):
-    name: str
-    email: str
-
-@app.post("/users")
-async def create_user(user: User):
-    return {"message": f"Created {user.name}"}
+@app.exception_handler(RequestValidationError)
+async def validation_handler(request, exc):
+    return JSONResponse(status_code=422, content={"errors": exc.errors()})
 ```
 
-### Q2: Difference between path and query parameters?
-**Answer:**
-```python
-# Path parameters - part of URL path
-@app.get("/users/{user_id}")
-def get_user(user_id: int):  # /users/123
-    pass
+---
 
-# Query parameters - after ? in URL
-@app.get("/users")
-def list_users(skip: int = 0, limit: int = 10):  # /users?skip=0&limit=10
-    pass
-```
+**Q2: What is dependency injection in FastAPI and how is cleanup handled?**
 
-### Q3: What is dependency injection in FastAPI?
-**Answer:**
-Dependency injection is a way to share common logic across routes.
+FastAPI's DI system resolves dependencies in the correct order before calling the path function. Dependencies that use `yield` support cleanup:
 
 ```python
-from fastapi import Depends
-
-# Dependency function
-def get_db():
-    db = Database()
+async def get_db():
+    db = AsyncSession()
     try:
         yield db
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
     finally:
-        db.close()
+        await db.close()
+```
 
-# Use in route
-@app.get("/items")
-def get_items(db: Database = Depends(get_db)):
-    return db.get_all_items()
+FastAPI ensures the finally block runs even if the endpoint raises an exception. This is similar to a context manager. Dependencies can be scoped to: request (default, new instance per request), app startup (use `@asynccontextmanager` lifespan), or overridden in tests via `app.dependency_overrides`.
+
+---
+
+**Q3: Explain FastAPI's response model and how to exclude/include fields.**
+
+```python
+class UserResponse(BaseModel):
+    id: int
+    email: str
+    # password NOT included — security
+
+@router.get("/me", response_model=UserResponse)
+async def get_me(current_user: User = Depends(get_current_user)):
+    return current_user   # FastAPI filters to only UserResponse fields
+
+# Exclude None fields from response
+@router.get("/me", response_model=UserResponse, response_model_exclude_none=True)
+async def get_me(...)
+
+# Dynamic exclusion
+@router.get("/admin/users/{id}")
+async def get_user_admin(id: int, include_private: bool = False):
+    user = await fetch_user(id)
+    exclude = set() if include_private else {"internal_id", "admin_notes"}
+    return user.model_dump(exclude=exclude)
 ```
 
 ---
 
-## Intermediate Level
-
-### Q4: How does FastAPI handle authentication?
-**Answer:**
-```python
-from fastapi import Depends, HTTPException
-from fastapi.security import OAuth2PasswordBearer
-
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
-
-async def get_current_user(token: str = Depends(oauth2_scheme)):
-    user = decode_token(token)
-    if not user:
-        raise HTTPException(status_code=401, detail="Invalid token")
-    return user
-
-@app.get("/protected")
-async def protected_route(user: User = Depends(get_current_user)):
-    return {"user": user.name}
-```
-
-### Q5: Explain middleware in FastAPI
-**Answer:**
-```python
-from fastapi import FastAPI, Request
-import time
-
-app = FastAPI()
-
-@app.middleware("http")
-async def add_process_time(request: Request, call_next):
-    start_time = time.time()
-    response = await call_next(request)
-    process_time = time.time() - start_time
-    response.headers["X-Process-Time"] = str(process_time)
-    return response
-```
-
-### Q6: How to handle background tasks?
-**Answer:**
-```python
-from fastapi import BackgroundTasks
-
-def send_email(email: str, message: str):
-    # Long running task
-    pass
-
-@app.post("/signup")
-async def signup(email: str, background_tasks: BackgroundTasks):
-    background_tasks.add_task(send_email, email, "Welcome!")
-    return {"message": "Signup successful"}
-```
-
----
-
-## Advanced Level
-
-### Q7: How to optimize FastAPI performance?
-**Answer:**
-1. **Use async routes** for I/O-bound operations
-2. **Connection pooling** for databases
-3. **Caching** with Redis
-4. **Response streaming** for large data
-5. **Proper pagination**
+**Q4: How do you implement pagination in FastAPI?**
 
 ```python
-# Async database operations
-async def get_users():
-    async with async_session() as session:
-        result = await session.execute(select(User))
-        return result.scalars().all()
+from pydantic import BaseModel
+from typing import Generic, TypeVar
 
-# Caching
-from fastapi_cache import FastAPICache
+T = TypeVar("T")
 
-@app.get("/expensive")
-@cache(expire=60)
-async def expensive_operation():
-    pass
-```
+class PaginatedResponse(BaseModel, Generic[T]):
+    items: list[T]
+    total: int
+    page: int
+    size: int
+    pages: int
+    next_page: int | None
+    prev_page: int | None
 
-### Q8: Testing strategies for FastAPI?
-**Answer:**
-```python
-from fastapi.testclient import TestClient
-import pytest
-
-@pytest.fixture
-def client():
-    return TestClient(app)
-
-def test_create_user(client):
-    response = client.post(
-        "/users",
-        json={"name": "Test", "email": "test@example.com"}
+def paginate(items, total, page, size):
+    pages = (total + size - 1) // size
+    return PaginatedResponse(
+        items=items, total=total, page=page, size=size, pages=pages,
+        next_page=page + 1 if page < pages else None,
+        prev_page=page - 1 if page > 1 else None,
     )
-    assert response.status_code == 201
-    assert response.json()["name"] == "Test"
 ```
+
+For cursor-based pagination (better for large datasets): use a unique sort key (created_at + id) as cursor, encode as base64, and use `WHERE created_at < cursor_time OR (created_at = cursor_time AND id < cursor_id)`.
 
 ---
 
-# Chapter 35: AWS CDK Interview Questions
+## Section 2: AWS Lambda Questions
 
-### Q1: What is Infrastructure as Code (IaC)?
-**Answer:**
-IaC is managing infrastructure using code files instead of manual configuration.
-- **Benefits**: Version control, reproducibility, automation, consistency
-- **Tools**: AWS CDK, Terraform, CloudFormation
+**Q5: What triggers a Lambda cold start, and what are SnapStart and Provisioned Concurrency?**
 
-### Q2: CDK vs CloudFormation vs Terraform?
-**Answer:**
-| Feature | CDK | CloudFormation | Terraform |
-|---------|-----|----------------|-----------|
-| Language | Python, TypeScript, etc. | YAML/JSON | HCL |
-| Provider | AWS only | AWS only | Multi-cloud |
-| Abstraction | High-level constructs | Low-level | Medium |
-| State | CloudFormation | CloudFormation | Terraform state |
+Cold start occurs when: (1) first invocation ever; (2) traffic spike requiring new execution environments; (3) after ~15 minutes of idle; (4) after a code deployment.
 
-### Q3: Explain CDK constructs levels
-**Answer:**
-```
-L1 (Cfn): Direct CloudFormation
-   └── CfnBucket
+**Provisioned Concurrency**: Pre-initializes N execution environments. They're always ready — zero cold start. Charged per GB-hour even when idle. Best for latency-sensitive APIs.
 
-L2 (Standard): With sensible defaults
-   └── Bucket
+**SnapStart** (Java only): Takes a snapshot of the initialized JVM state. On cold start, restores from snapshot instead of reinitializing. Reduces Java cold starts from 1-5s to ~100ms. Enabled per Lambda version, not function.
 
-L3 (Patterns): Multiple resources
-   └── ApplicationLoadBalancedFargateService
-```
-
-### Q4: How to share resources between stacks?
-**Answer:**
-```python
-# Stack A - Export
-class DatabaseStack(Stack):
-    def __init__(self, scope, id, **kwargs):
-        super().__init__(scope, id, **kwargs)
-        self.table = dynamodb.Table(...)
-
-# Stack B - Import
-class AppStack(Stack):
-    def __init__(self, scope, id, table, **kwargs):
-        super().__init__(scope, id, **kwargs)
-        table.grant_read_write_data(self.lambda_function)
-
-# app.py
-db_stack = DatabaseStack(app, "DB")
-app_stack = AppStack(app, "App", table=db_stack.table)
-```
-
-### Q5: How to test CDK code?
-**Answer:**
-```python
-from aws_cdk.assertions import Template
-
-def test_resources_created():
-    app = cdk.App()
-    stack = MyStack(app, "test")
-    template = Template.from_stack(stack)
-    
-    template.has_resource_properties("AWS::Lambda::Function", {
-        "Runtime": "python3.11"
-    })
-    template.resource_count_is("AWS::DynamoDB::Table", 1)
-```
+For Python: keep init code minimal, use lazy imports for optional modules, use Lambda Layers to prevent re-downloading dependencies on each cold start.
 
 ---
 
-# Chapter 36: AWS Lambda Interview Questions
+**Q6: How does Lambda scale, and what are concurrency limits?**
 
-### Q1: What is cold start and how to minimize it?
-**Answer:**
-Cold start occurs when Lambda creates a new container. Minimize by:
-- Initialize outside handler
-- Use provisioned concurrency
-- Keep functions warm
-- Minimize package size
-- Use Lambda layers
+Lambda scales by adding execution environments (one per concurrent invocation). **Account-level burst limit**: 3000 in us-east-1/us-west-2 (500-1000 in other regions), with +500/min linear scaling. **Throttling**: If burst limit exceeded, Lambda returns 429 — SQS automatically retries, API GW returns 502.
+
+**Reserved Concurrency**: Hard cap per function (e.g., `max: 100`). Protects other functions from a runaway function consuming the pool. Also guarantees capacity.
+
+**Concurrency math**: If a function processes one SQS message and takes 5 seconds, and 100 messages arrive simultaneously → 100 concurrent executions needed. Size your reserved concurrency accordingly.
+
+---
+
+**Q7: How do you handle Lambda timeouts and implement proper timeout handling?**
 
 ```python
-# Initialize outside handler
-import boto3
-dynamodb = boto3.resource('dynamodb')
-table = dynamodb.Table('users')
+import signal
+from aws_lambda_powertools import Logger
+
+logger = Logger()
 
 def handler(event, context):
-    # Use pre-initialized resources
-    return table.get_item(Key={'id': '123'})
+    # Check remaining time before starting expensive operation
+    if context.get_remaining_time_in_millis() < 5000:
+        logger.error("Insufficient time remaining, aborting")
+        raise TimeoutError("Lambda timeout imminent")
+    
+    # For external calls, set timeouts less than Lambda timeout
+    import httpx
+    timeout = httpx.Timeout(
+        connect=2.0,
+        read=min(10.0, context.get_remaining_time_in_millis() / 1000 - 2),
+        write=5.0,
+    )
+    response = httpx.get("https://api.external.com/data", timeout=timeout)
 ```
 
-### Q2: Lambda concurrency types?
-**Answer:**
-```
-Reserved Concurrency:
-- Guarantees AND limits concurrent executions
-- Protects downstream resources
-
-Provisioned Concurrency:
-- Pre-warms containers
-- Eliminates cold starts
-- Higher cost
-```
-
-### Q3: How does Lambda scale?
-**Answer:**
-- Scales automatically (up to account limits)
-- Default: 1000 concurrent executions
-- Burst scaling: Immediate, then linear
-- No manual intervention needed
-
-### Q4: Lambda best practices?
-**Answer:**
-1. **Single responsibility** - One function per task
-2. **Initialize outside handler** - Connection reuse
-3. **Use environment variables** - Configuration
-4. **Minimize package size** - Faster cold starts
-5. **Set appropriate timeout** - Don't waste money
-6. **Use structured logging** - Debugging
-7. **Handle errors gracefully** - Retry logic
+For SQS: set Lambda timeout < SQS visibility timeout. If Lambda times out while processing, the message becomes visible again and retries.
 
 ---
 
-# Chapter 37: Kubernetes Interview Questions
+## Section 3: AWS CDK / CloudFormation Questions
 
-### Q1: Pod vs Container?
-**Answer:**
-- **Container**: Single running process (Docker)
-- **Pod**: One or more containers sharing network/storage
-- Pod is the smallest deployable unit in K8s
+**Q8: What is the difference between CDK App, Stage, and Stack?**
 
-### Q2: Deployment vs StatefulSet?
-**Answer:**
-| Deployment | StatefulSet |
-|------------|-------------|
-| Stateless apps | Stateful apps |
-| Random pod names | Ordered names (pod-0, pod-1) |
-| Shared storage | Unique storage per pod |
-| Web servers, APIs | Databases, Kafka |
+**App**: Root of the CDK application. Contains all stacks and stages. `cdk synth` processes the entire App. **Stack**: A CloudFormation stack — a unit of deployment. Maps to a single CFN stack. Has its own template, parameters, outputs. **Stage**: Groups stacks for pipeline deployment. A Stage gets deployed as a unit (all stacks together). Enables deploying the same infrastructure to multiple environments (dev, prod) with different configs.
 
-### Q3: How does service discovery work?
-**Answer:**
-```
-1. Service gets stable DNS name
-2. Pods register with Service
-3. Service load balances to healthy pods
-
-DNS: my-service.namespace.svc.cluster.local
-```
-
-### Q4: Explain liveness vs readiness probes
-**Answer:**
-```yaml
-livenessProbe:   # Is container alive? Restart if not
-  httpGet:
-    path: /health
-    port: 8000
-
-readinessProbe:  # Is container ready for traffic?
-  httpGet:
-    path: /ready
-    port: 8000
-```
-
-### Q5: Horizontal Pod Autoscaler?
-**Answer:**
-```yaml
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-spec:
-  scaleTargetRef:
-    kind: Deployment
-    name: my-app
-  minReplicas: 2
-  maxReplicas: 10
-  metrics:
-    - type: Resource
-      resource:
-        name: cpu
-        target:
-          type: Utilization
-          averageUtilization: 70
+```python
+# Hierarchy
+App
+└── ProdStage (environment=prod, account=111...)
+│   ├── NetworkStack
+│   ├── DataStack
+│   └── AppStack
+└── DevStage (environment=dev, account=222...)
+    ├── NetworkStack
+    ├── DataStack
+    └── AppStack
 ```
 
 ---
 
-# Chapter 38: System Design Questions
+**Q9: How do you handle rollback in CloudFormation?**
 
-### Q1: Design a URL Shortener with Lambda
-**Architecture:**
-```
-Client → API Gateway → Lambda → DynamoDB
-                           ↓
-                     S3 (analytics)
-```
+By default, CloudFormation rolls back automatically on failure. Key mechanisms: (1) **Rollback triggers**: CloudWatch alarms that trigger auto-rollback if they fire during the monitoring window post-deployment; (2) **Stack policies**: Prevent certain update types (Replace/Delete) on protected resources; (3) **`--disable-rollback`**: Flag to disable auto-rollback for debugging; (4) **`UPDATE_ROLLBACK_FAILED` state**: When rollback itself fails (e.g., trying to restore a deleted resource). Recovery: `continue-update-rollback` with resources that failed rollback skipped.
 
-**Components:**
-- Lambda for create/redirect
-- DynamoDB for URL mappings
-- CloudFront for caching
-
-### Q2: Design a Scalable Notification System
-**Architecture:**
-```
-API → SQS → Lambda → SNS → Email/SMS/Push
-        ↓
-    DLQ for failures
-```
-
-### Q3: Design Microservices on EKS
-**Architecture:**
-```
-Internet → ALB → Ingress Controller
-                      ↓
-        ┌─────────────┼─────────────┐
-        ▼             ▼             ▼
-    User Service  Order Service  Payment Service
-        │             │             │
-        └─────────────┴─────────────┘
-                      ↓
-              Service Mesh (Istio)
-```
-
-### Q4: Compare Lambda vs EKS
-| Factor | Lambda | EKS |
-|--------|--------|-----|
-| Cost | Pay per invocation | Pay for cluster |
-| Scaling | Automatic | HPA required |
-| Cold start | Yes | No |
-| Long running | 15 min max | Unlimited |
-| Complexity | Low | High |
-| Control | Limited | Full |
-
-**Use Lambda:** Short tasks, variable traffic, simple apps
-**Use EKS:** Long-running, consistent traffic, complex apps
+For production: always add rollback triggers monitoring your key metrics (5xx rate, Lambda errors, DB connections).
 
 ---
 
-# Behavioral Questions
+## Section 4: EKS/Kubernetes Questions
 
-### Q: Tell me about a challenging project
-**Structure:**
-1. **Situation**: What was the context?
-2. **Task**: What were you responsible for?
-3. **Action**: What did you do?
-4. **Result**: What was the outcome?
+**Q10: What is the difference between ConfigMap and Secret, and how do you manage secrets in Kubernetes?**
 
-**Example:**
-"In my previous role, we needed to migrate a monolithic application to serverless. I led the design of Lambda functions with API Gateway. I implemented proper error handling and monitoring with CloudWatch. The result was 60% cost reduction and 5x better scalability."
+**ConfigMap**: Non-sensitive configuration (feature flags, URLs, app settings). Stored unencrypted in etcd. Available as environment variables or mounted files.
 
-### Q: How do you stay updated with technology?
-- Follow AWS blogs and announcements
-- Participate in communities
-- Build personal projects
-- Get certifications
-- Attend conferences/webinars
+**Secret**: Sensitive data (passwords, tokens, API keys). Base64-encoded (NOT encrypted by default in etcd). To actually secure secrets: (1) **Envelope encryption**: Encrypt etcd with a KMS key (`--encryption-provider-config`); (2) **External Secrets Operator**: Sync from AWS Secrets Manager/SSM to Kubernetes Secrets automatically (recommended); (3) **AWS Secrets Store CSI Driver**: Mount secrets directly as volumes, no copy in etcd.
+
+For EKS production: never put plaintext secrets in manifests. Use External Secrets Operator with AWS Secrets Manager. The operator creates/syncs Kubernetes Secrets automatically.
 
 ---
 
-*Continue to Part 7 for Complete Projects...*
+**Q11: How does Kubernetes networking work at a high level?**
+
+Every Pod gets a unique IP. Pods can communicate with each other directly (flat network) without NAT. Services provide stable DNS names and IP (ClusterIP) that load-balance across pod endpoints. 
+
+**Key components**: (1) **CNI plugin** (AWS VPC CNI on EKS): assigns real VPC IPs to pods — they're directly routable; (2) **kube-proxy**: Manages iptables/IPVS rules for Service IP → Pod IP routing; (3) **CoreDNS**: Resolves `service.namespace.svc.cluster.local` to ClusterIP; (4) **Network Policies**: Firewall rules between pods (requires CNI support).
+
+In EKS with VPC CNI: each pod gets a secondary IP from the VPC subnet. Pod-to-pod traffic stays within VPC, no overlay network overhead. Direct integration with security groups via Security Groups for Pods.
+
+---
+
+## Section 5: System Design Questions
+
+**Q12: Design a high-throughput order processing system on AWS.**
+
+```
+API Layer:      CloudFront → ALB → ECS Fargate (FastAPI)
+Async Queue:    SQS FIFO (per customer) → Lambda workers
+Database:       DynamoDB (order state) + Aurora (reporting)
+Cache:          ElastiCache Redis (session, rate limiting, idempotency)
+Notifications:  SNS → SQS fan-out (email, SMS, analytics)
+Observability:  CloudWatch + X-Ray + OpenSearch
+```
+
+Key design decisions:
+- **Idempotency**: Idempotency-Key header + Redis NX set prevents double-orders
+- **Optimistic locking**: DynamoDB condition expressions prevent race conditions
+- **FIFO queues**: Per-customer ordering guarantees (message group = customer ID)
+- **Circuit breaker**: Resilience4j / Polly pattern for downstream service failures
+- **Saga pattern**: Step Functions for multi-step orders (reserve → charge → fulfill)
+
+---
+
+**Q13: How do you handle database migrations with zero downtime?**
+
+Multi-phase approach:
+1. **Add nullable column** (backward compatible, old code ignores it)
+2. **Deploy new code** that reads from old column, writes to both
+3. **Backfill** old data into new column
+4. **Deploy code** that reads from new column primarily
+5. **Drop old column** (after verifying no reads)
+
+For RDS with ECS/K8s: use Alembic in an init container that runs before app containers, or in a separate migration job. Never run migrations at app startup in production (multiple pods would race). Use advisory locks in PostgreSQL to prevent concurrent migration runs.
+
+---
+
+## Practice Interview Answers (STAR Format)
+
+**"Tell me about a time you improved API performance."**
+
+Situation: API latency at P99 was 800ms, causing timeout errors for mobile users.
+Task: Reduce P99 to under 200ms without downtime.
+Action: (1) Added APM tracing (X-Ray) — found N+1 DB queries; (2) Rewrote with bulk fetches; (3) Added Redis caching for user profile lookups (TTL 5min); (4) Moved non-critical work (notifications) to SQS background processing.
+Result: P99 dropped to 120ms. Error rate from 2% to 0.01%.

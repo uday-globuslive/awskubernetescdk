@@ -1,214 +1,80 @@
-# Chapter 3: Core Resources
-## S3, IAM, EC2 & Security Groups in CloudFormation
+# CloudFormation Chapter 3: Core Resources — EC2, IAM, S3 & Auto Scaling
+## Complete Resource Definitions with All Key Properties
 
 ---
 
-## 3.1 S3 Bucket
+## 3.1 EC2 Instances — Full Configuration
 
 ```yaml
-AWSTemplateFormatVersion: "2010-09-09"
-Description: S3 bucket with versioning, encryption, and lifecycle
+AWSTemplateFormatVersion: '2010-09-09'
+Description: EC2 with full configuration — security group, IAM role, user data
 
 Parameters:
-  BucketName:
+  InstanceType:
     Type: String
-    Description: S3 bucket name (must be globally unique)
+    Default: t3.micro
+    AllowedValues: [t3.micro, t3.small, t3.medium, t3.large, m5.large, m5.xlarge]
+  
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
 
 Resources:
-
-  # --------------------------------------------------
-  # S3 Bucket — versioning, encryption, notifications
-  # --------------------------------------------------
-  AppDataBucket:
-    Type: AWS::S3::Bucket
-    DeletionPolicy: Retain
-    UpdateReplacePolicy: Retain
-    Properties:
-      BucketName: !Ref BucketName
-      
-      # Versioning
-      VersioningConfiguration:
-        Status: Enabled
-      
-      # Encryption at rest
-      BucketEncryption:
-        ServerSideEncryptionConfiguration:
-          - ServerSideEncryptionByDefault:
-              SSEAlgorithm: AES256
-            BucketKeyEnabled: true
-      
-      # Block all public access
-      PublicAccessBlockConfiguration:
-        BlockPublicAcls: true
-        BlockPublicPolicy: true
-        IgnorePublicAcls: true
-        RestrictPublicBuckets: true
-      
-      # Lifecycle rules
-      LifecycleConfiguration:
-        Rules:
-          - Id: MoveToIA
-            Status: Enabled
-            Transitions:
-              - TransitionInDays: 90
-                StorageClass: STANDARD_IA
-              - TransitionInDays: 365
-                StorageClass: GLACIER
-            NoncurrentVersionTransitions:
-              - TransitionInDays: 30
-                StorageClass: STANDARD_IA
-            NoncurrentVersionExpirationInDays: 90
-      
-      # Event notifications (notify Lambda on object creation)
-      NotificationConfiguration:
-        LambdaConfigurations:
-          - Event: "s3:ObjectCreated:*"
-            Filter:
-              S3Key:
-                Rules:
-                  - Name: prefix
-                    Value: uploads/
-                  - Name: suffix
-                    Value: .csv
-            Function: !GetAtt ProcessUploadFunction.Arn
-      
-      Tags:
-        - Key: Environment
-          Value: !Ref "AWS::StackName"
-
-  # Bucket policy — allow read-only from a specific role
-  AppDataBucketPolicy:
-    Type: AWS::S3::BucketPolicy
-    Properties:
-      Bucket: !Ref AppDataBucket
-      PolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Sid: AllowSSLOnly
-            Effect: Deny
-            Principal: "*"
-            Action: "s3:*"
-            Resource:
-              - !GetAtt AppDataBucket.Arn
-              - !Sub "${AppDataBucket.Arn}/*"
-            Condition:
-              Bool:
-                "aws:SecureTransport": false
-          
-          - Sid: AllowAppRole
-            Effect: Allow
-            Principal:
-              AWS: !GetAtt AppRole.Arn
-            Action:
-              - s3:GetObject
-              - s3:PutObject
-              - s3:DeleteObject
-            Resource: !Sub "${AppDataBucket.Arn}/*"
-
-Outputs:
-  BucketName:
-    Value: !Ref AppDataBucket
-    Export:
-      Name: !Sub "${AWS::StackName}-BucketName"
-  BucketArn:
-    Value: !GetAtt AppDataBucket.Arn
-    Export:
-      Name: !Sub "${AWS::StackName}-BucketArn"
-```
-
----
-
-## 3.2 IAM Resources
-
-```yaml
-Resources:
-
-  # --------------------------------------------------
-  # IAM Role — for EC2 or Lambda
-  # --------------------------------------------------
-  AppRole:
+  # ── IAM Role for EC2 ─────────────────────────────────
+  EC2InstanceRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub "${AWS::StackName}-app-role"
-      
-      # Trust policy — who can assume this role
+      RoleName: !Sub '${AWS::StackName}-ec2-role'
       AssumeRolePolicyDocument:
-        Version: "2012-10-17"
+        Version: '2012-10-17'
         Statement:
           - Effect: Allow
             Principal:
-              Service:
-                - ec2.amazonaws.com
-                - lambda.amazonaws.com
+              Service: ec2.amazonaws.com
             Action: sts:AssumeRole
-      
-      # Managed policies attached
       ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
-      
-      # Inline policies (defined inline)
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore  # SSM Session Manager
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy   # CW Agent
       Policies:
-        - PolicyName: S3Access
+        - PolicyName: AppPermissions
           PolicyDocument:
-            Version: "2012-10-17"
+            Version: '2012-10-17'
             Statement:
               - Effect: Allow
                 Action:
                   - s3:GetObject
                   - s3:PutObject
-                  - s3:DeleteObject
-                Resource: !Sub "arn:aws:s3:::${BucketName}/*"
+                Resource: !Sub 'arn:aws:s3:::${AppBucket}/*'
               - Effect: Allow
                 Action:
-                  - s3:ListBucket
-                Resource: !Sub "arn:aws:s3:::${BucketName}"
-      
+                  - secretsmanager:GetSecretValue
+                Resource: !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AWS::StackName}/*'
       Tags:
-        - Key: Environment
-          Value: prod
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-ec2-role'
 
-  # --------------------------------------------------
-  # Standalone managed policy (reusable across roles)
-  # --------------------------------------------------
-  ReadSecretsPolicy:
-    Type: AWS::IAM::ManagedPolicy
-    Properties:
-      ManagedPolicyName: !Sub "${AWS::StackName}-read-secrets"
-      PolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Effect: Allow
-            Action:
-              - secretsmanager:GetSecretValue
-            Resource:
-              - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AWS::StackName}/*"
-
-  # --------------------------------------------------
-  # Instance Profile — wraps Role for EC2 instances
-  # --------------------------------------------------
-  AppInstanceProfile:
+  EC2InstanceProfile:
     Type: AWS::IAM::InstanceProfile
     Properties:
-      InstanceProfileName: !Sub "${AWS::StackName}-instance-profile"
+      InstanceProfileName: !Sub '${AWS::StackName}-instance-profile'
       Roles:
-        - !Ref AppRole
-```
+        - !Ref EC2InstanceRole
 
----
-
-## 3.3 EC2 Security Group
-
-```yaml
-Resources:
-
-  # --------------------------------------------------
-  # VPC Security Groups
-  # --------------------------------------------------
-  ALBSecurityGroup:
+  # ── Security Group ────────────────────────────────────
+  AppSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupName: !Sub "${AWS::StackName}-alb-sg"
-      GroupDescription: Security group for Application Load Balancer
+      GroupName: !Sub '${AWS::StackName}-app-sg'
+      GroupDescription: Security group for application servers
       VpcId: !Ref VpcId
       SecurityGroupIngress:
         - IpProtocol: tcp
@@ -221,239 +87,400 @@ Resources:
           ToPort: 443
           CidrIp: 0.0.0.0/0
           Description: HTTPS from internet
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          CidrIp: 10.0.0.0/8
+          Description: App port from internal networks
+      SecurityGroupEgress:
+        - IpProtocol: -1      # All traffic
+          CidrIp: 0.0.0.0/0
+          Description: Allow all outbound
       Tags:
         - Key: Name
-          Value: !Sub "${AWS::StackName}-alb-sg"
+          Value: !Sub '${AWS::StackName}-app-sg'
 
-  AppSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupName: !Sub "${AWS::StackName}-app-sg"
-      GroupDescription: Security group for application servers
-      VpcId: !Ref VpcId
-      SecurityGroupIngress:
-        # Only accept traffic from ALB
-        - IpProtocol: tcp
-          FromPort: 8000
-          ToPort: 8000
-          SourceSecurityGroupId: !Ref ALBSecurityGroup
-          Description: App port from ALB only
-        # SSH from bastion only
-        - IpProtocol: tcp
-          FromPort: 22
-          ToPort: 22
-          SourceSecurityGroupId: !Ref BastionSecurityGroup
-          Description: SSH from bastion
-      Tags:
-        - Key: Name
-          Value: !Sub "${AWS::StackName}-app-sg"
-
-  DatabaseSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupName: !Sub "${AWS::StackName}-db-sg"
-      GroupDescription: Security group for RDS
-      VpcId: !Ref VpcId
-      SecurityGroupIngress:
-        # Only accept connections from app tier
-        - IpProtocol: tcp
-          FromPort: 5432
-          ToPort: 5432
-          SourceSecurityGroupId: !Ref AppSecurityGroup
-          Description: PostgreSQL from app servers only
-      Tags:
-        - Key: Name
-          Value: !Sub "${AWS::StackName}-db-sg"
-
-  # Self-referencing rule (ElastiCache cluster members talk to each other)
-  CacheSecurityGroupIngress:
-    Type: AWS::EC2::SecurityGroupIngress
-    Properties:
-      GroupId: !Ref CacheSecurityGroup
-      IpProtocol: tcp
-      FromPort: 6379
-      ToPort: 6379
-      SourceSecurityGroupId: !Ref AppSecurityGroup
-      Description: Redis from app servers
-```
-
----
-
-## 3.4 EC2 Instance
-
-```yaml
-Parameters:
-  KeyPairName:
-    Type: AWS::EC2::KeyPair::KeyName
-    Description: EC2 key pair for SSH access
-
-  AmiId:
-    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
-    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
-
-Resources:
-
-  # --------------------------------------------------
-  # EC2 Instance
-  # --------------------------------------------------
+  # ── EC2 Instance ──────────────────────────────────────
   AppInstance:
     Type: AWS::EC2::Instance
     Properties:
       ImageId: !Ref AmiId
-      InstanceType: t3.medium
+      InstanceType: !Ref InstanceType
       KeyName: !Ref KeyPairName
-      IamInstanceProfile: !Ref AppInstanceProfile
-      SubnetId: !Select [0, !Ref PrivateSubnets]
+      SubnetId: !Ref SubnetId
       SecurityGroupIds:
         - !Ref AppSecurityGroup
-      
-      # Root volume
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      DisableApiTermination: false    # Set true in prod
+      EbsOptimized: true
+      Monitoring: true                # Detailed CloudWatch monitoring (1-minute)
       BlockDeviceMappings:
-        - DeviceName: /dev/xvda
+        - DeviceName: /dev/xvda       # Root volume
           Ebs:
             VolumeSize: 30
             VolumeType: gp3
+            Iops: 3000
+            Throughput: 125           # MB/s
             Encrypted: true
             DeleteOnTermination: true
-      
-      # Bootstrap script
+        - DeviceName: /dev/xvdb       # Data volume
+          Ebs:
+            VolumeSize: 100
+            VolumeType: gp3
+            Encrypted: true
+            DeleteOnTermination: false  # Persist data volume
+      MetadataOptions:
+        HttpTokens: required          # Require IMDSv2 (security best practice)
+        HttpPutResponseHopLimit: 1    # Limit hops (prevent SSRF)
+        InstanceMetadataTags: enabled
       UserData:
-        !Base64
-          Fn::Sub: |
-            #!/bin/bash
-            set -e
-            yum update -y
-            yum install -y python3-pip git
-            
-            # Install application
-            pip3 install fastapi uvicorn boto3
-            
-            # Get secrets from Secrets Manager
-            DB_CREDS=$(aws secretsmanager get-secret-value \
-              --secret-id ${AWS::StackName}/db-credentials \
-              --query SecretString --output text)
-            
-            # Signal CloudFormation success
-            /opt/aws/bin/cfn-signal -e $? \
-              --stack ${AWS::StackName} \
-              --resource AppInstance \
-              --region ${AWS::Region}
-      
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -e
+          yum update -y
+          
+          # Install CloudWatch agent
+          yum install -y amazon-cloudwatch-agent
+          
+          # Install app dependencies
+          yum install -y python3 python3-pip nginx
+          
+          # Download and configure app
+          aws s3 cp s3://${AppBucket}/app.tar.gz /tmp/
+          tar -xzf /tmp/app.tar.gz -C /opt/
+          
+          # Signal CloudFormation success
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} \
+            --resource AppInstance --region ${AWS::Region}
       Tags:
         - Key: Name
-          Value: !Sub "${AWS::StackName}-app"
-    
+          Value: !Sub '${AWS::StackName}-app-server'
+        - Key: Environment
+          Value: !Ref Environment
     CreationPolicy:
       ResourceSignal:
-        Timeout: PT10M
+        Timeout: PT10M    # Wait up to 10 minutes for cfn-signal
 
-  # Elastic IP (optional — for fixed public IP)
+  # ── Elastic IP (optional) ─────────────────────────────
   AppEIP:
     Type: AWS::EC2::EIP
-    Condition: IsProd
     Properties:
       Domain: vpc
       InstanceId: !Ref AppInstance
       Tags:
         - Key: Name
-          Value: !Sub "${AWS::StackName}-eip"
+          Value: !Sub '${AWS::StackName}-app-eip'
 ```
 
 ---
 
-## 3.5 Complete Working Template
+## 3.2 Auto Scaling Groups
 
 ```yaml
-# core-resources.yaml — S3 + IAM + EC2 complete example
-AWSTemplateFormatVersion: "2010-09-09"
-Description: Core resources - S3, IAM Role, Security Group, EC2
-
-Parameters:
-  Environment:
-    Type: String
-    AllowedValues: [dev, prod]
-    Default: dev
-  VpcId:
-    Type: AWS::EC2::VPC::Id
-  SubnetId:
-    Type: AWS::EC2::Subnet::Id
-
-Conditions:
-  IsProd: !Equals [!Ref Environment, prod]
-
-Resources:
-  AppBucket:
-    Type: AWS::S3::Bucket
-    DeletionPolicy: !If [IsProd, Retain, Delete]
+  # ── Launch Template (replaces Launch Configuration) ──
+  AppLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
     Properties:
-      BucketEncryption:
-        ServerSideEncryptionConfiguration:
-          - ServerSideEncryptionByDefault:
-              SSEAlgorithm: AES256
+      LaunchTemplateName: !Sub '${AWS::StackName}-lt'
+      LaunchTemplateData:
+        ImageId: !Ref AmiId
+        InstanceType: !Ref InstanceType
+        IamInstanceProfile:
+          Arn: !GetAtt EC2InstanceProfile.Arn
+        SecurityGroupIds:
+          - !Ref AppSecurityGroup
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeSize: 30
+              VolumeType: gp3
+              Encrypted: true
+              DeleteOnTermination: true
+        MetadataOptions:
+          HttpTokens: required
+          HttpPutResponseHopLimit: 1
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            yum update -y
+            yum install -y python3 nginx
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: !Sub '${AWS::StackName}-asg-instance'
+              - Key: Environment
+                Value: !Ref Environment
 
-  AppRole:
+  # ── Auto Scaling Group ────────────────────────────────
+  AppASG:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: !Sub '${AWS::StackName}-asg'
+      LaunchTemplate:
+        LaunchTemplateId: !Ref AppLaunchTemplate
+        Version: !GetAtt AppLaunchTemplate.LatestVersionNumber
+      MinSize: !If [IsProd, "2", "1"]
+      MaxSize: !If [IsProd, "20", "4"]
+      DesiredCapacity: !If [IsProd, "2", "1"]
+      VPCZoneIdentifier:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      TargetGroupARNs:
+        - !Ref AppTargetGroup
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 300
+      TerminationPolicies:
+        - OldestLaunchTemplate   # Remove instances with old config first
+        - OldestInstance
+      MetricsCollection:
+        - Granularity: 1Minute
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-asg'
+          PropagateAtLaunch: true
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MinInstancesInService: !If [IsProd, 1, 0]
+        MaxBatchSize: 2
+        PauseTime: PT5M
+        WaitOnResourceSignals: true
+
+  # ── Scaling Policies ──────────────────────────────────
+  CPUScaleOutPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref AppASG
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization
+        TargetValue: 70.0
+        ScaleInCooldown: 300
+        ScaleOutCooldown: 60
+
+  # Custom metric scaling (SQS queue depth)
+  SQSScalingPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref AppASG
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        CustomizedMetricSpecification:
+          MetricName: ApproximateNumberOfMessagesVisible
+          Namespace: AWS/SQS
+          Dimensions:
+            - Name: QueueName
+              Value: !GetAtt AppQueue.QueueName
+          Statistic: Average
+          Unit: Count
+        TargetValue: 10.0     # Target 10 messages per instance
+```
+
+---
+
+## 3.3 IAM Resources — Roles, Policies, Users
+
+```yaml
+  # ── Cross-Account Role ────────────────────────────────
+  CrossAccountRole:
     Type: AWS::IAM::Role
     Properties:
+      RoleName: cross-account-deploy-role
       AssumeRolePolicyDocument:
-        Version: "2012-10-17"
+        Version: '2012-10-17'
         Statement:
           - Effect: Allow
             Principal:
-              Service: ec2.amazonaws.com
+              AWS: !Sub 'arn:aws:iam::${TrustedAccountId}:root'
             Action: sts:AssumeRole
-      Policies:
-        - PolicyName: BucketAccess
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              - Effect: Allow
-                Action: [s3:GetObject, s3:PutObject]
-                Resource: !Sub "${AppBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:MultiFactorAuthPresent: true
+              StringEquals:
+                sts:ExternalId: !Ref ExternalId  # Confused deputy prevention
+      MaxSessionDuration: 3600
+      Path: /cross-account/
 
-  AppInstanceProfile:
-    Type: AWS::IAM::InstanceProfile
+  # ── Customer Managed Policy ───────────────────────────
+  S3ReadPolicy:
+    Type: AWS::IAM::ManagedPolicy
     Properties:
-      Roles: [!Ref AppRole]
+      ManagedPolicyName: !Sub '${AWS::StackName}-s3-read-policy'
+      Description: Read access to application S3 bucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:GetObjectVersion
+              - s3:ListBucket
+              - s3:GetBucketLocation
+            Resource:
+              - !GetAtt AppBucket.Arn
+              - !Sub '${AppBucket.Arn}/*'
 
-  AppSG:
-    Type: AWS::EC2::SecurityGroup
+  # ── Service-Linked Role (example: ECS) ───────────────
+  # Usually created automatically, but can be explicit:
+  ECSServiceRole:
+    Type: AWS::IAM::ServiceLinkedRole
     Properties:
-      GroupDescription: App server security group
-      VpcId: !Ref VpcId
-      SecurityGroupIngress:
-        - IpProtocol: tcp
-          FromPort: 8000
-          ToPort: 8000
-          CidrIp: 10.0.0.0/8
+      AWSServiceName: ecs.amazonaws.com
 
-  AppInstance:
-    Type: AWS::EC2::Instance
+  # ── OIDC Provider for GitHub Actions ─────────────────
+  GitHubOIDCProvider:
+    Type: AWS::IAM::OIDCProvider
     Properties:
-      ImageId: !Sub "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}"
-      InstanceType: !If [IsProd, t3.medium, t3.micro]
-      SubnetId: !Ref SubnetId
-      IamInstanceProfile: !Ref AppInstanceProfile
-      SecurityGroupIds: [!Ref AppSG]
-      Tags:
-        - Key: Name
-          Value: !Sub "${AWS::StackName}-app"
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      ThumbprintList:
+        - 6938fd4d98bab03faadb97b34396831e3780aea1
 
-Outputs:
-  InstanceId:
-    Value: !Ref AppInstance
-  BucketName:
-    Value: !Ref AppBucket
+  GitHubActionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: github-actions-deploy-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !GetAtt GitHubOIDCProvider.Arn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                token.actions.githubusercontent.com:sub: !Sub 'repo:${GitHubOrg}/${GitHubRepo}:*'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonECR_FullAccess
 ```
 
 ---
 
-## 3.6 Interview Questions
+## 3.4 S3 Buckets — Comprehensive Configuration
 
-**Q: Why do you need an InstanceProfile when attaching a Role to EC2?**
-> An IAM Role is a standalone identity that can be assumed by various principals (EC2, Lambda, another service). An InstanceProfile is a container that holds a Role and is the mechanism through which EC2 instances can assume it. EC2 instances can only reference an InstanceProfile, not a Role directly. Lambda functions reference Roles directly. CloudFormation automatically creates an InstanceProfile with the same name as the Role when using `AWS::IAM::InstanceProfile`, but you must explicitly create it and reference it in the EC2 resource.
+```yaml
+  # ── Secure Application Bucket ─────────────────────────
+  AppBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain    # Don't delete bucket on stack deletion
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub '${AWS::StackName}-app-${AWS::AccountId}'
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - BucketKeyEnabled: true   # Reduce KMS API calls/costs
+            ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref KMSKey
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      IntelligentTieringConfigurations:
+        - Id: auto-tier
+          Status: Enabled
+          Tierings:
+            - AccessTier: ARCHIVE_ACCESS
+              Days: 90
+            - AccessTier: DEEP_ARCHIVE_ACCESS
+              Days: 180
+      LifecycleConfiguration:
+        Rules:
+          - Id: transition-and-expire
+            Status: Enabled
+            Transitions:
+              - StorageClass: STANDARD_IA
+                TransitionInDays: 30
+              - StorageClass: GLACIER
+                TransitionInDays: 90
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 30
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: uploads/
+                  - Name: suffix
+                    Value: .csv
+            Function: !GetAtt ProcessUploadFunction.Arn
+      ReplicationConfiguration:
+        Role: !GetAtt S3ReplicationRole.Arn
+        Rules:
+          - Id: replicate-to-backup-region
+            Status: Enabled
+            Filter:
+              Prefix: critical-data/
+            Destination:
+              Bucket: !Sub 'arn:aws:s3:::${AWS::StackName}-backup-${AWS::AccountId}'
+              StorageClass: STANDARD_IA
+              ReplicationTime:
+                Status: Enabled
+                Time:
+                  Minutes: 15
+              Metrics:
+                Status: Enabled
+      Tags:
+        - Key: DataClassification
+          Value: confidential
 
-**Q: What is the recommended practice for security groups — reference by ID or CIDR?**
-> Always reference by security group ID (`SourceSecurityGroupId`) rather than CIDR ranges where possible. This is more secure because: (1) IP ranges can change; (2) SG references automatically update when instances are added to the referenced group; (3) they convey intent clearly ("traffic from the ALB SG" vs "traffic from 10.0.0.0/8"). Use CIDR ranges only for external traffic (internet-facing ALB, VPN CIDR, office IP).
+  # ── Bucket Policy ─────────────────────────────────────
+  AppBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref AppBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyUnencryptedObjectUploads
+            Effect: Deny
+            Principal: '*'
+            Action: s3:PutObject
+            Resource: !Sub '${AppBucket.Arn}/*'
+            Condition:
+              StringNotEquals:
+                s3:x-amz-server-side-encryption: aws:kms
+          - Sid: DenyNonSSLRequests
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - !GetAtt AppBucket.Arn
+              - !Sub '${AppBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+          - Sid: AllowAppRole
+            Effect: Allow
+            Principal:
+              AWS: !GetAtt EC2InstanceRole.Arn
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:DeleteObject
+            Resource: !Sub '${AppBucket.Arn}/*'
+```
 
-**Q: How does UserData work in CloudFormation and how do you ensure it ran successfully?**
-> UserData is a Base64-encoded script that EC2 runs on first boot. In CloudFormation, use `!Base64` with `Fn::Sub` to inject stack variables into the script. To know if UserData ran successfully, install `cfn-init` and `cfn-signal` from the AWS CloudFormation helper scripts, and use `CreationPolicy` with `ResourceSignal` on the resource. The instance sends a success or failure signal at the end of the script, and CloudFormation waits for it before marking the resource complete — or rolls back if the signal indicates failure or the timeout is exceeded.
+---
+
+## 3.5 Interview Q&A
+
+**Q: What is the DeletionPolicy attribute and when should you use Retain?**
+A: `DeletionPolicy` controls what happens to a resource when the CloudFormation stack is deleted. Options: `Delete` (default — resource deleted with stack), `Retain` (resource kept but removed from stack management), `Snapshot` (creates final snapshot before deleting — for EBS, RDS, ElastiCache). Use `Retain` for S3 buckets with data, RDS databases with production data, and any resource you can't afford to lose accidentally. Also use `UpdateReplacePolicy: Retain` to prevent data loss when a resource replacement is triggered by an update.
+
+**Q: What is the difference between a Launch Template and a Launch Configuration?**
+A: Launch Configurations are the legacy approach — immutable, must create new one for every change, no versioning, being deprecated. Launch Templates support versioning (keep history), can be modified to create new versions, support mixed instance types (On-Demand + Spot), support instance refresh, and are required for newer features like Attribute-based Instance Selection. Always use Launch Templates for new ASGs. LTs also support spot override per instance type for cost optimization.
+
+**Q: How do you implement zero-downtime rolling updates in CloudFormation?**
+A: Using the `UpdatePolicy` on an AutoScaling group with `AutoScalingRollingUpdate`: set `MinInstancesInService` to keep minimum healthy instances during update (e.g., 1 for a 2-instance group), `MaxBatchSize` to limit how many instances update at once, and `WaitOnResourceSignals: true` with `cfn-signal` in UserData to only proceed after new instances confirm healthy. Combined with ELB health checks (`HealthCheckType: ELB`) and `HealthCheckGracePeriod`, this enables zero-downtime updates.

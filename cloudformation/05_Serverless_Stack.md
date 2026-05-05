@@ -1,133 +1,48 @@
-# Chapter 5: Serverless Stack
-## Lambda + API Gateway + DynamoDB Full Template
+# CloudFormation Chapter 5: Serverless Stack — Lambda, API Gateway & EventBridge
+## Complete Serverless Application Templates with SAM
 
 ---
 
-## 5.1 Architecture
-
-```
-┌──────────────────────────────────────────────────────────────┐
-│             SERVERLESS API ARCHITECTURE                      │
-│                                                              │
-│  Client                                                      │
-│    │                                                         │
-│    ▼                                                         │
-│  API Gateway (HTTP API)                                      │
-│    │                                                         │
-│    ├── GET  /items        → Lambda: listItems                │
-│    ├── POST /items        → Lambda: createItem               │
-│    ├── GET  /items/{id}   → Lambda: getItem                  │
-│    ├── PUT  /items/{id}   → Lambda: updateItem               │
-│    └── DELETE /items/{id} → Lambda: deleteItem               │
-│                │                                             │
-│                ▼                                             │
-│           DynamoDB Table                                     │
-│           (items table with GSI)                             │
-└──────────────────────────────────────────────────────────────┘
-```
-
----
-
-## 5.2 Serverless Stack Template
+## 5.1 Lambda Function — Complete CloudFormation Resource
 
 ```yaml
-# serverless-stack.yaml
-AWSTemplateFormatVersion: "2010-09-09"
-Description: Serverless REST API — Lambda + HTTP API Gateway + DynamoDB
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Serverless application with Lambda, API Gateway, and DynamoDB
 
 Parameters:
   Environment:
     Type: String
-    Default: dev
     AllowedValues: [dev, staging, prod]
+    Default: dev
 
-  LogRetentionDays:
-    Type: Number
-    Default: 14
-    AllowedValues: [7, 14, 30, 90]
+  DeploymentPackage:
+    Type: String
+    Description: S3 key for Lambda deployment package
 
-Conditions:
-  IsProd: !Equals [!Ref Environment, prod]
+  ArtifactBucket:
+    Type: String
+    Description: S3 bucket containing Lambda artifacts
 
 Resources:
-
-  # ============================================================
-  # DYNAMODB TABLE
-  # ============================================================
-  ItemsTable:
-    Type: AWS::DynamoDB::Table
-    DeletionPolicy: !If [IsProd, Retain, Delete]
-    UpdateReplacePolicy: Retain
-    Properties:
-      TableName: !Sub "${AWS::StackName}-items"
-      
-      BillingMode: PAY_PER_REQUEST    # On-demand — scales automatically
-      
-      # Primary key
-      AttributeDefinitions:
-        - AttributeName: PK
-          AttributeType: S
-        - AttributeName: SK
-          AttributeType: S
-        - AttributeName: userId
-          AttributeType: S
-        - AttributeName: createdAt
-          AttributeType: S
-      
-      KeySchema:
-        - AttributeName: PK
-          KeyType: HASH
-        - AttributeName: SK
-          KeyType: RANGE
-      
-      # Global Secondary Index — query by userId
-      GlobalSecondaryIndexes:
-        - IndexName: userId-createdAt-index
-          KeySchema:
-            - AttributeName: userId
-              KeyType: HASH
-            - AttributeName: createdAt
-              KeyType: RANGE
-          Projection:
-            ProjectionType: ALL
-      
-      # Point-in-time recovery
-      PointInTimeRecoverySpecification:
-        PointInTimeRecoveryEnabled: true
-      
-      # Encryption at rest (managed by AWS)
-      SSESpecification:
-        SSEEnabled: true
-      
-      # TTL attribute
-      TimeToLiveSpecification:
-        AttributeName: ttl
-        Enabled: true
-      
-      Tags:
-        - Key: Environment
-          Value: !Ref Environment
-
-  # ============================================================
-  # IAM ROLE FOR LAMBDA
-  # ============================================================
-  LambdaExecutionRole:
+  # ── Lambda Execution Role ─────────────────────────────
+  LambdaRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub "${AWS::StackName}-lambda-role"
+      RoleName: !Sub '${AWS::StackName}-lambda-role'
       AssumeRolePolicyDocument:
-        Version: "2012-10-17"
+        Version: '2012-10-17'
         Statement:
           - Effect: Allow
             Principal:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
       ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
       Policies:
-        - PolicyName: DynamoDBAccess
+        - PolicyName: LambdaAppPermissions
           PolicyDocument:
-            Version: "2012-10-17"
+            Version: '2012-10-17'
             Statement:
               - Effect: Allow
                 Action:
@@ -137,172 +52,156 @@ Resources:
                   - dynamodb:DeleteItem
                   - dynamodb:Query
                   - dynamodb:Scan
-                Action:
-                  - dynamodb:GetItem
-                  - dynamodb:PutItem
-                  - dynamodb:UpdateItem
-                  - dynamodb:DeleteItem
-                  - dynamodb:Query
-                  - dynamodb:Scan
+                  - dynamodb:BatchGetItem
+                  - dynamodb:BatchWriteItem
                 Resource:
-                  - !GetAtt ItemsTable.Arn
-                  - !Sub "${ItemsTable.Arn}/index/*"
-        - PolicyName: SecretsAccess
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
+                  - !GetAtt OrdersTable.Arn
+                  - !Sub '${OrdersTable.Arn}/index/*'
               - Effect: Allow
                 Action:
                   - secretsmanager:GetSecretValue
                 Resource:
-                  - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AWS::StackName}/*"
+                  - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AWS::StackName}/*'
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                Resource: !GetAtt ProcessingQueue.Arn
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}*:*'
 
-  # ============================================================
-  # LAMBDA FUNCTIONS
-  # ============================================================
-  
-  # Shared environment variables for all Lambda functions
-  # (use a Lambda Layer or SSM instead for production)
-  
-  ListItemsFunction:
+  # ── Lambda Function ───────────────────────────────────
+  OrdersFunction:
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: !Sub "${AWS::StackName}-list-items"
-      Runtime: python3.12
-      Handler: list_items.handler
-      Role: !GetAtt LambdaExecutionRole.Arn
-      Timeout: 30
-      MemorySize: 256
+      FunctionName: !Sub '${AWS::StackName}-orders'
+      Runtime: python3.11
+      Handler: handlers.orders.handler
+      Role: !GetAtt LambdaRole.Arn
+      Code:
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: !Ref DeploymentPackage
+      MemorySize: 512
+      Timeout: 29          # API GW max is 29s
+      ReservedConcurrentExecutions: 100   # Hard limit, protect DB
       Environment:
         Variables:
-          TABLE_NAME: !Ref ItemsTable
+          ORDERS_TABLE: !Ref OrdersTable
+          PROCESSING_QUEUE_URL: !Ref ProcessingQueue
           ENVIRONMENT: !Ref Environment
-      Code:
-        ZipFile: |
-          import boto3, json, os
-          
-          table = boto3.resource("dynamodb").Table(os.environ["TABLE_NAME"])
-          
-          def handler(event, context):
-              user_id = event["queryStringParameters"].get("userId") if event.get("queryStringParameters") else None
-              
-              if user_id:
-                  response = table.query(
-                      IndexName="userId-createdAt-index",
-                      KeyConditionExpression="userId = :uid",
-                      ExpressionAttributeValues={":uid": user_id}
-                  )
-              else:
-                  response = table.scan()
-              
-              return {
-                  "statusCode": 200,
-                  "headers": {"Content-Type": "application/json"},
-                  "body": json.dumps(response["Items"])
-              }
+          POWERTOOLS_SERVICE_NAME: !Sub '${AWS::StackName}-orders'
+          LOG_LEVEL: !If [IsProd, INFO, DEBUG]
+      VpcConfig:
+        SubnetIds: !Split [',', !ImportValue 'network-stack-PrivateSubnets']
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+      Layers:
+        - !Ref CommonLayer
+        - !Sub 'arn:aws:lambda:${AWS::Region}:017000801446:layer:AWSLambdaPowertoolsPythonV2-Arm64:x'
+      Architectures:
+        - arm64      # Graviton2 — 20% faster, 20% cheaper than x86
+      EphemeralStorage:
+        Size: 1024   # /tmp size in MB
+      TracingConfig:
+        Mode: Active    # X-Ray tracing
+      SnapStart:        # Only for Java, preview for others
+        ApplyOn: None
       Tags:
-        - Key: Environment
-          Value: !Ref Environment
+        Environment: !Ref Environment
+        Service: orders
 
-  CreateItemFunction:
-    Type: AWS::Lambda::Function
+  # ── Lambda Version and Alias ──────────────────────────
+  OrdersFunctionVersion:
+    Type: AWS::Lambda::Version
     Properties:
-      FunctionName: !Sub "${AWS::StackName}-create-item"
-      Runtime: python3.12
-      Handler: create_item.handler
-      Role: !GetAtt LambdaExecutionRole.Arn
-      Timeout: 30
-      MemorySize: 256
-      Environment:
-        Variables:
-          TABLE_NAME: !Ref ItemsTable
-          ENVIRONMENT: !Ref Environment
-      Code:
-        ZipFile: |
-          import boto3, json, os, uuid
-          from datetime import datetime
-          
-          table = boto3.resource("dynamodb").Table(os.environ["TABLE_NAME"])
-          
-          def handler(event, context):
-              body = json.loads(event.get("body", "{}"))
-              item_id = str(uuid.uuid4())
-              
-              item = {
-                  "PK": f"ITEM#{item_id}",
-                  "SK": "METADATA",
-                  "id": item_id,
-                  "userId": body.get("userId", "anonymous"),
-                  "name": body["name"],
-                  "createdAt": datetime.utcnow().isoformat() + "Z",
-              }
-              
-              table.put_item(Item=item)
-              
-              return {
-                  "statusCode": 201,
-                  "headers": {"Content-Type": "application/json"},
-                  "body": json.dumps(item)
-              }
+      FunctionName: !GetAtt OrdersFunction.Arn
+      Description: !Sub 'Version for ${Environment}'
 
-  GetItemFunction:
-    Type: AWS::Lambda::Function
+  OrdersFunctionAlias:
+    Type: AWS::Lambda::Alias
     Properties:
-      FunctionName: !Sub "${AWS::StackName}-get-item"
-      Runtime: python3.12
-      Handler: get_item.handler
-      Role: !GetAtt LambdaExecutionRole.Arn
-      Timeout: 10
-      MemorySize: 128
-      Environment:
-        Variables:
-          TABLE_NAME: !Ref ItemsTable
-      Code:
-        ZipFile: |
-          import boto3, json, os
-          
-          table = boto3.resource("dynamodb").Table(os.environ["TABLE_NAME"])
-          
-          def handler(event, context):
-              item_id = event["pathParameters"]["id"]
-              response = table.get_item(Key={"PK": f"ITEM#{item_id}", "SK": "METADATA"})
-              
-              if "Item" not in response:
-                  return {"statusCode": 404, "body": json.dumps({"error": "Not found"})}
-              
-              return {
-                  "statusCode": 200,
-                  "headers": {"Content-Type": "application/json"},
-                  "body": json.dumps(response["Item"])
-              }
+      FunctionName: !Ref OrdersFunction
+      FunctionVersion: !GetAtt OrdersFunctionVersion.Version
+      Name: !Ref Environment    # live / prod / dev alias
+      # Canary routing (10% to new, 90% to old)
+      # RoutingConfig:
+      #   AdditionalVersionWeights:
+      #     - FunctionVersion: !GetAtt OrdersFunctionVersionV2.Version
+      #       FunctionWeight: 0.1
 
-  # ============================================================
-  # CLOUDWATCH LOG GROUPS (explicit — controls retention)
-  # ============================================================
-  ListItemsLogGroup:
+  # ── Provisioned Concurrency ───────────────────────────
+  OrdersFunctionPC:
+    Type: AWS::Lambda::ProvisionedConcurrencyConfig
+    Condition: IsProd
+    Properties:
+      FunctionName: !Ref OrdersFunction
+      Qualifier: !GetAtt OrdersFunctionAlias.AliasArn
+      ProvisionedConcurrentExecutions: 5
+
+  # ── Log Group ─────────────────────────────────────────
+  OrdersFunctionLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
-      LogGroupName: !Sub "/aws/lambda/${ListItemsFunction}"
-      RetentionInDays: !Ref LogRetentionDays
+      LogGroupName: !Sub '/aws/lambda/${OrdersFunction}'
+      RetentionInDays: !If [IsProd, 90, 14]
 
-  CreateItemLogGroup:
-    Type: AWS::Logs::LogGroup
+  # ── Lambda Layer ──────────────────────────────────────
+  CommonLayer:
+    Type: AWS::Lambda::LayerVersion
     Properties:
-      LogGroupName: !Sub "/aws/lambda/${CreateItemFunction}"
-      RetentionInDays: !Ref LogRetentionDays
+      LayerName: !Sub '${AWS::StackName}-common'
+      Description: Common dependencies (boto3, pydantic, etc.)
+      Content:
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: layers/common-layer.zip
+      CompatibleRuntimes:
+        - python3.11
+      CompatibleArchitectures:
+        - arm64
 
-  # ============================================================
-  # API GATEWAY — HTTP API
-  # ============================================================
+  LayerPermission:
+    Type: AWS::Lambda::LayerVersionPermission
+    Properties:
+      Action: lambda:GetLayerVersion
+      LayerVersionArn: !Ref CommonLayer
+      Principal: !Ref AWS::AccountId
+
+  # ── Event Source Mapping (SQS → Lambda) ──────────────
+  SQSTrigger:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt ProcessingQueue.Arn
+      FunctionName: !GetAtt ProcessorFunction.Arn
+      BatchSize: 10
+      MaximumBatchingWindowInSeconds: 30    # Wait up to 30s to fill batch
+      FunctionResponseTypes:
+        - ReportBatchItemFailures     # Partial batch failure
+      ScalingConfig:
+        MaximumConcurrency: 50       # Max concurrent Lambda for this trigger
+```
+
+---
+
+## 5.2 API Gateway — HTTP API
+
+```yaml
+  # ── HTTP API (low cost, high performance) ─────────────
   HttpApi:
     Type: AWS::ApiGatewayV2::Api
     Properties:
-      Name: !Sub "${AWS::StackName}-api"
+      Name: !Sub '${AWS::StackName}-api'
       ProtocolType: HTTP
-      Description: Items REST API
+      Description: Orders service REST API
       CorsConfiguration:
         AllowOrigins:
-          - "*"
+          - 'https://app.example.com'
+          - !If [IsNotProd, 'http://localhost:3000', !Ref AWS::NoValue]
         AllowMethods:
           - GET
           - POST
@@ -312,154 +211,203 @@ Resources:
         AllowHeaders:
           - Content-Type
           - Authorization
+          - X-Request-ID
+        MaxAge: 3600
+        AllowCredentials: true
 
-  HttpApiStage:
+  # ── JWT Authorizer ────────────────────────────────────
+  CognitoAuthorizer:
+    Type: AWS::ApiGatewayV2::Authorizer
+    Properties:
+      ApiId: !Ref HttpApi
+      AuthorizerType: JWT
+      Name: cognito-authorizer
+      IdentitySource:
+        - $request.header.Authorization
+      JwtConfiguration:
+        Audience:
+          - !Ref UserPoolClient
+        Issuer: !Sub 'https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPool}'
+
+  # ── Lambda Integration ────────────────────────────────
+  OrdersIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${OrdersFunction.Arn}/invocations'
+      PayloadFormatVersion: "2.0"    # Newer, smaller payload format
+      TimeoutInMillis: 29000
+
+  # ── Routes ────────────────────────────────────────────
+  ListOrdersRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /orders
+      AuthorizationType: JWT
+      AuthorizerId: !Ref CognitoAuthorizer
+      Target: !Sub 'integrations/${OrdersIntegration}'
+      AuthorizationScopes:
+        - orders:read
+
+  CreateOrderRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /orders
+      AuthorizationType: JWT
+      AuthorizerId: !Ref CognitoAuthorizer
+      Target: !Sub 'integrations/${OrdersIntegration}'
+      AuthorizationScopes:
+        - orders:write
+
+  HealthRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /health
+      AuthorizationType: NONE
+      Target: !Sub 'integrations/${OrdersIntegration}'
+
+  # ── Stage (auto-deploy) ───────────────────────────────
+  DefaultStage:
     Type: AWS::ApiGatewayV2::Stage
     Properties:
       ApiId: !Ref HttpApi
-      StageName: !Ref Environment
+      StageName: $default
       AutoDeploy: true
+      AccessLogSettings:
+        DestinationArn: !GetAtt APIAccessLogGroup.Arn
+        Format: '{"requestId":"$context.requestId","ip":"$context.identity.sourceIp","requestTime":"$context.requestTime","httpMethod":"$context.httpMethod","routeKey":"$context.routeKey","status":"$context.status","protocol":"$context.protocol","responseLength":"$context.responseLength","integrationLatency":"$context.integrationLatency","responseLatency":"$context.responseLatency"}'
       DefaultRouteSettings:
-        ThrottlingBurstLimit: 100
-        ThrottlingRateLimit: 50
+        ThrottlingBurstLimit: 1000
+        ThrottlingRateLimit: 500
 
-  # ============================================================
-  # API GATEWAY INTEGRATIONS
-  # ============================================================
-  ListItemsIntegration:
-    Type: AWS::ApiGatewayV2::Integration
-    Properties:
-      ApiId: !Ref HttpApi
-      IntegrationType: AWS_PROXY
-      IntegrationUri: !GetAtt ListItemsFunction.Arn
-      PayloadFormatVersion: "2.0"
-
-  CreateItemIntegration:
-    Type: AWS::ApiGatewayV2::Integration
-    Properties:
-      ApiId: !Ref HttpApi
-      IntegrationType: AWS_PROXY
-      IntegrationUri: !GetAtt CreateItemFunction.Arn
-      PayloadFormatVersion: "2.0"
-
-  GetItemIntegration:
-    Type: AWS::ApiGatewayV2::Integration
-    Properties:
-      ApiId: !Ref HttpApi
-      IntegrationType: AWS_PROXY
-      IntegrationUri: !GetAtt GetItemFunction.Arn
-      PayloadFormatVersion: "2.0"
-
-  # ============================================================
-  # API GATEWAY ROUTES
-  # ============================================================
-  ListItemsRoute:
-    Type: AWS::ApiGatewayV2::Route
-    Properties:
-      ApiId: !Ref HttpApi
-      RouteKey: GET /items
-      Target: !Sub "integrations/${ListItemsIntegration}"
-
-  CreateItemRoute:
-    Type: AWS::ApiGatewayV2::Route
-    Properties:
-      ApiId: !Ref HttpApi
-      RouteKey: POST /items
-      Target: !Sub "integrations/${CreateItemIntegration}"
-
-  GetItemRoute:
-    Type: AWS::ApiGatewayV2::Route
-    Properties:
-      ApiId: !Ref HttpApi
-      RouteKey: GET /items/{id}
-      Target: !Sub "integrations/${GetItemIntegration}"
-
-  # ============================================================
-  # LAMBDA PERMISSIONS (allow API GW to invoke each function)
-  # ============================================================
-  ListItemsPermission:
+  # ── Lambda Permission for API GW ──────────────────────
+  ApiGatewayLambdaPermission:
     Type: AWS::Lambda::Permission
     Properties:
-      FunctionName: !Ref ListItemsFunction
+      FunctionName: !Ref OrdersFunction
       Action: lambda:InvokeFunction
       Principal: apigateway.amazonaws.com
-      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*"
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*'
 
-  CreateItemPermission:
+  APIAccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/apigateway/${AWS::StackName}'
+      RetentionInDays: 30
+
+  # ── Custom Domain ─────────────────────────────────────
+  APICustomDomain:
+    Type: AWS::ApiGatewayV2::DomainName
+    Properties:
+      DomainName: !Sub 'api.${DomainName}'
+      DomainNameConfigurations:
+        - CertificateArn: !Ref Certificate
+          EndpointType: REGIONAL
+          SecurityPolicy: TLS_1_2
+
+  APIMapping:
+    Type: AWS::ApiGatewayV2::ApiMapping
+    DependsOn: DefaultStage
+    Properties:
+      DomainName: !Ref APICustomDomain
+      ApiId: !Ref HttpApi
+      Stage: $default
+```
+
+---
+
+## 5.3 EventBridge Rule Template
+
+```yaml
+  # ── EventBridge — Scheduled Rule ─────────────────────
+  DailyReportRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${AWS::StackName}-daily-report'
+      Description: Trigger daily report generation at 8 AM UTC
+      ScheduleExpression: cron(0 8 * * ? *)    # 8 AM UTC every day
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt ReportFunction.Arn
+          Id: ReportTarget
+          Input: !Sub '{"environment": "${Environment}", "type": "daily"}'
+
+  DailyReportPermission:
     Type: AWS::Lambda::Permission
     Properties:
-      FunctionName: !Ref CreateItemFunction
+      FunctionName: !Ref ReportFunction
       Action: lambda:InvokeFunction
-      Principal: apigateway.amazonaws.com
-      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*"
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt DailyReportRule.Arn
 
-  GetItemPermission:
-    Type: AWS::Lambda::Permission
+  # ── EventBridge — Custom Event Bus ───────────────────
+  OrdersEventBus:
+    Type: AWS::Events::EventBus
     Properties:
-      FunctionName: !Ref GetItemFunction
-      Action: lambda:InvokeFunction
-      Principal: apigateway.amazonaws.com
-      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*"
+      Name: !Sub '${AWS::StackName}-orders'
 
-# ============================================================
-# OUTPUTS
-# ============================================================
+  # ── EventBridge — Content-Based Rule ─────────────────
+  OrderCreatedRule:
+    Type: AWS::Events::Rule
+    Properties:
+      EventBusName: !Ref OrdersEventBus
+      EventPattern:
+        source:
+          - orders-service
+        detail-type:
+          - Order Created
+        detail:
+          status:
+            - CONFIRMED
+          amount:
+            numeric:
+              - '>'
+              - 100
+      Targets:
+        - Arn: !GetAtt NotificationFunction.Arn
+          Id: NotifyTarget
+          InputTransformer:
+            InputPathsMap:
+              orderId: $.detail.orderId
+              amount: $.detail.amount
+              customer: $.detail.customerId
+            InputTemplate: |
+              {
+                "message": "New order <orderId> for $<amount> from customer <customer>",
+                "priority": "high"
+              }
+        - Arn: !GetAtt ProcessingQueue.Arn
+          Id: QueueTarget
+          SqsParameters:
+            MessageGroupId: orders
+
 Outputs:
-  ApiUrl:
-    Description: HTTP API endpoint URL
-    Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}"
+  ApiEndpoint:
+    Description: API Gateway endpoint URL
+    Value: !GetAtt HttpApi.ApiEndpoint
     Export:
-      Name: !Sub "${AWS::StackName}-ApiUrl"
+      Name: !Sub '${AWS::StackName}-ApiEndpoint'
 
-  TableName:
-    Description: DynamoDB table name
-    Value: !Ref ItemsTable
+  FunctionArn:
+    Description: Orders Lambda function ARN
+    Value: !GetAtt OrdersFunction.Arn
     Export:
-      Name: !Sub "${AWS::StackName}-TableName"
-
-  TableArn:
-    Description: DynamoDB table ARN
-    Value: !GetAtt ItemsTable.Arn
+      Name: !Sub '${AWS::StackName}-OrdersFunctionArn'
 ```
 
 ---
 
-## 5.3 Deploying the Stack
+## 5.4 Interview Q&A
 
-```bash
-# Lint first
-cfn-lint serverless-stack.yaml
+**Q: How do you handle Lambda function updates in CloudFormation without downtime?**
+A: Use versions and aliases: (1) Lambda version is an immutable snapshot of function code + config; (2) Alias points to a version and is used by consumers (API GW, SQS); (3) On update, create a new version and update the alias to point to it. For canary deployments, use `RoutingConfig` on the alias to split traffic (e.g., 10% to new version, 90% to old). Combine with CodeDeploy Lambda deployment groups for automated traffic shifting with pre/post hooks for smoke tests.
 
-# Deploy (dev)
-aws cloudformation deploy \
-  --template-file serverless-stack.yaml \
-  --stack-name items-api-dev \
-  --parameter-overrides Environment=dev \
-  --capabilities CAPABILITY_NAMED_IAM \
-  --region us-east-1
+**Q: What is the difference between API Gateway V1 (REST API) and V2 (HTTP API)?**
+A: HTTP API (V2): cheaper (~70% less), lower latency, JWT/Lambda authorizers, auto-deploy, native CORS, OIDC support. Lacks: WAF integration, usage plans/API keys, custom authorizer caching, request/response transformation, body validation. REST API (V1): full-featured, WAF support, usage plans with API keys, throttling per stage/method, request/response mapping, model validation, VPC Link. Use HTTP API for simple Lambda-backed APIs with JWT auth. Use REST API when you need WAF, usage plans, or advanced request/response handling.
 
-# Get the API URL
-API_URL=$(aws cloudformation describe-stacks \
-  --stack-name items-api-dev \
-  --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue" \
-  --output text)
-
-# Test endpoints
-curl $API_URL/items
-curl -X POST $API_URL/items \
-  -H "Content-Type: application/json" \
-  -d '{"name": "Test item", "userId": "user-123"}'
-```
-
----
-
-## 5.4 Interview Questions
-
-**Q: Why do you need `AWS::Lambda::Permission` when using API Gateway?**
-> API Gateway needs explicit permission to invoke Lambda functions. Without a `Lambda::Permission` resource, the invocation will fail with a 403 AccessDeniedException even though the Lambda execution role doesn't grant this permission to itself — it's a resource-based policy on the Lambda function. The `SourceArn` condition is important for security: it restricts the permission to only the specific API Gateway, not any API Gateway in the account. This prevents confused deputy attacks.
-
-**Q: What is the difference between HTTP API and REST API in API Gateway?**
-> HTTP API is newer, simpler, and cheaper (~70% less cost). It supports Lambda proxy integrations, JWT authorisers, CORS, and is ideal for CRUD APIs. REST API supports more features: request/response transformations, usage plans, API keys, WAF integration, resource policies, more detailed access logging, and mock integrations. For most modern serverless applications, HTTP API is the right choice. Use REST API when you need usage plans, API keys for third-party access, or request/response transformation.
-
-**Q: Why define CloudWatch Log Groups explicitly in CloudFormation?**
-> If you don't define a `LogGroup` resource, Lambda auto-creates one without a retention policy — logs accumulate forever and cost grows indefinitely. Defining the log group explicitly lets you set `RetentionInDays` and also means the log group is cleaned up when the stack is deleted. Name it exactly `/aws/lambda/{FunctionName}` so Lambda uses it automatically. This is a simple best practice that prevents unexpected costs.
+**Q: How do you configure Lambda to only allow invocation from your API Gateway?**
+A: Use `AWS::Lambda::Permission` with `SourceArn` pointing to your specific API Gateway ARN pattern. For HTTP API: `arn:aws:execute-api:region:account:api-id/*/*`. For REST API: `arn:aws:execute-api:region:account:api-id/stage/method/resource`. This prevents other API Gateways or direct Lambda invocations without API GW. Additionally, if Lambda is in a VPC, its security group can restrict network-level access. For inter-service calls, use resource-based policies limiting Principal to specific IAM roles.

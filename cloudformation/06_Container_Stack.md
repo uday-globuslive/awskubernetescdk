@@ -1,124 +1,329 @@
-# Chapter 6: Container Stack
-## ECR + ECS Fargate + ALB Full Template
+# CloudFormation Chapter 6: Container Stack — ECS Fargate & ECR
+## Complete ECS Service, Task Definitions, and Container Registry Templates
 
 ---
 
-## 6.1 Architecture
-
-```
-┌──────────────────────────────────────────────────────────────┐
-│              ECS FARGATE ARCHITECTURE                        │
-│                                                              │
-│  Internet                                                    │
-│      │                                                       │
-│      ▼                                                       │
-│  ALB (public subnets)                                        │
-│  ├── HTTPS Listener (port 443)                               │
-│  │   └── Target Group (port 8000)                            │
-│  └── HTTP Listener (port 80 → redirect 443)                  │
-│             │                                                │
-│    ┌────────┼────────────────┐                               │
-│    ▼        ▼                ▼                               │
-│  ECS Fargate Tasks (private subnets, 3 AZs)                  │
-│  ┌──────────────────────────────┐                            │
-│  │ FastAPI container            │                            │
-│  │ CPU: 512, Mem: 1024          │                            │
-│  └──────────────────────────────┘                            │
-│             │                                                │
-│    ┌────────┼─────────────────────┐                          │
-│    ▼        ▼                     ▼                          │
-│  RDS     ElastiCache         Secrets Manager                 │
-│  Aurora   Redis               (credentials)                  │
-│                                                              │
-│  ECS Service Auto Scaling:                                   │
-│  min=2, max=10, scale on CPU > 70%                          │
-└──────────────────────────────────────────────────────────────┘
-```
-
----
-
-## 6.2 Container Stack Template
+## 6.1 ECS Fargate — Complete Stack
 
 ```yaml
-# container-stack.yaml
-AWSTemplateFormatVersion: "2010-09-09"
-Description: ECS Fargate service with ALB, auto scaling, and ECR
+AWSTemplateFormatVersion: '2010-09-09'
+Description: ECS Fargate service with ALB, Service Connect, and auto-scaling
 
 Parameters:
   Environment:
     Type: String
-    Default: dev
     AllowedValues: [dev, staging, prod]
-
-  NetworkingStack:
-    Type: String
-    Description: Name of the networking stack (for cross-stack imports)
+    Default: dev
 
   ImageUri:
     Type: String
-    Description: ECR image URI (e.g., 123456.dkr.ecr.us-east-1.amazonaws.com/myapp:latest)
-    Default: "public.ecr.aws/amazonlinux/amazonlinux:latest"
-
-  ContainerPort:
-    Type: Number
-    Default: 8000
-
-  CertificateArn:
-    Type: String
-    Default: ""
-    Description: ACM certificate ARN for HTTPS (leave empty for HTTP only)
+    Description: Full ECR image URI (e.g., 123456789012.dkr.ecr.us-east-1.amazonaws.com/my-app:v1.2.3)
 
   DesiredCount:
     Type: Number
     Default: 2
 
-  TaskCpu:
-    Type: String
-    Default: "512"
-    AllowedValues: ["256", "512", "1024", "2048", "4096"]
+  CpuUnits:
+    Type: Number
+    Default: 512
+    AllowedValues: [256, 512, 1024, 2048, 4096]
 
-  TaskMemory:
-    Type: String
-    Default: "1024"
-    AllowedValues: ["512", "1024", "2048", "4096", "8192"]
+  MemoryMiB:
+    Type: Number
+    Default: 1024
 
 Conditions:
   IsProd: !Equals [!Ref Environment, prod]
-  HasCertificate: !Not [!Equals [!Ref CertificateArn, ""]]
 
 Resources:
+  # ── ECS Cluster ────────────────────────────────────────
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub '${AWS::StackName}-cluster'
+      CapacityProviders:
+        - FARGATE
+        - FARGATE_SPOT
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: FARGATE
+          Base: 2              # At least 2 tasks on FARGATE (not Spot)
+          Weight: 1
+        - CapacityProvider: FARGATE_SPOT
+          Base: 0
+          Weight: 4            # Remaining tasks on Spot (80% cheaper)
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+      ServiceConnectDefaults:
+        Namespace: !Sub '${AWS::StackName}-namespace'
 
-  # ============================================================
-  # ECR REPOSITORY
-  # ============================================================
-  ECRRepository:
+  # ── CloudWatch Log Group ───────────────────────────────
+  AppLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/ecs/${AWS::StackName}/app'
+      RetentionInDays: !If [IsProd, 90, 14]
+
+  # ── Task Execution Role ────────────────────────────────
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-task-execution-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: SecretAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                  - kms:Decrypt
+                Resource:
+                  - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AWS::StackName}/*'
+                  - !GetAtt AppKMSKey.Arn
+
+  # ── Task Role (app runtime permissions) ───────────────
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-task-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AppPermissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:Query
+                Resource: !GetAtt AppTable.Arn
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                Resource: !GetAtt AppQueue.Arn
+              # Allow ECS Exec (for debugging)
+              - Effect: Allow
+                Action:
+                  - ssmmessages:CreateControlChannel
+                  - ssmmessages:CreateDataChannel
+                  - ssmmessages:OpenControlChannel
+                  - ssmmessages:OpenDataChannel
+                Resource: '*'
+
+  # ── Task Definition ────────────────────────────────────
+  AppTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${AWS::StackName}-app'
+      RequiresCompatibilities:
+        - FARGATE
+      NetworkMode: awsvpc
+      Cpu: !Ref CpuUnits
+      Memory: !Ref MemoryMiB
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      ContainerDefinitions:
+        - Name: app
+          Image: !Ref ImageUri
+          Essential: true
+          PortMappings:
+            - ContainerPort: 8000
+              Protocol: tcp
+              Name: app-port     # Named port for Service Connect
+              AppProtocol: http
+          Environment:
+            - Name: ENVIRONMENT
+              Value: !Ref Environment
+            - Name: APP_TABLE_NAME
+              Value: !Ref AppTable
+            - Name: LOG_LEVEL
+              Value: !If [IsProd, INFO, DEBUG]
+          Secrets:
+            - Name: DATABASE_URL
+              ValueFrom: !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AWS::StackName}/db-url'
+            - Name: API_KEY
+              ValueFrom: !Sub '/ssm/${AWS::StackName}/api-key'
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref AppLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: app
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - "curl -f http://localhost:8000/health || exit 1"
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 60    # Grace period for startup
+          ReadonlyRootFilesystem: true    # Security best practice
+          User: "1001"                    # Non-root user
+          ResourceRequirements: []
+          StopTimeout: 30                 # Grace period for graceful shutdown
+          LinuxParameters:
+            InitProcessEnabled: true      # Enable init process (reap zombies)
+
+        # Sidecar: FireLens log router
+        - Name: log-router
+          Image: amazon/aws-for-fluent-bit:stable
+          Essential: false
+          FirelensConfiguration:
+            Type: fluentbit
+            Options:
+              enable-ecs-log-metadata: "true"
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref AppLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: firelens
+
+  # ── ECS Service ────────────────────────────────────────
+  AppService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - AppListenerRule
+    Properties:
+      ServiceName: !Sub '${AWS::StackName}-app'
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref AppTaskDefinition
+      DesiredCount: !Ref DesiredCount
+      LaunchType: FARGATE
+      PlatformVersion: LATEST
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets: !Split [',', !ImportValue 'network-stack-PrivateSubnets']
+          SecurityGroups:
+            - !Ref AppSecurityGroup
+      LoadBalancers:
+        - ContainerName: app
+          ContainerPort: 8000
+          TargetGroupArn: !Ref AppTargetGroup
+      ServiceConnectConfiguration:
+        Enabled: true
+        Namespace: !Sub '${AWS::StackName}-namespace'
+        Services:
+          - PortName: app-port
+            DiscoveryName: app
+            ClientAliases:
+              - Port: 8000
+                DnsName: app
+        LogConfiguration:
+          LogDriver: awslogs
+          Options:
+            awslogs-group: !Ref AppLogGroup
+            awslogs-region: !Ref AWS::Region
+            awslogs-stream-prefix: service-connect
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 100
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true    # Auto-rollback on failed deployment
+      EnableExecuteCommand: true    # ECS Exec for debugging
+      PropagateTags: TASK_DEFINITION
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ── Auto Scaling ───────────────────────────────────────
+  ScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      ServiceNamespace: ecs
+      ResourceId: !Sub 'service/${ECSCluster}/${AppService.Name}'
+      ScalableDimension: ecs:service:DesiredCount
+      MinCapacity: !If [IsProd, 2, 1]
+      MaxCapacity: !If [IsProd, 50, 10]
+      RoleARN: !Sub 'arn:aws:iam::${AWS::AccountId}:role/aws-service-role/ecs.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_ECSService'
+
+  CPUScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: cpu-target-tracking
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref ScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        TargetValue: 70.0
+        ScaleOutCooldown: 60
+        ScaleInCooldown: 300
+
+  RequestScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: alb-request-tracking
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref ScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ALBRequestCountPerTarget
+          ResourceLabel: !Sub
+            - '${ALBSuffix}/${TargetGroupSuffix}'
+            - ALBSuffix: !GetAtt AppALB.LoadBalancerFullName
+              TargetGroupSuffix: !GetAtt AppTargetGroup.TargetGroupFullName
+        TargetValue: 1000.0    # 1000 requests per task
+```
+
+---
+
+## 6.2 ECR — Elastic Container Registry
+
+```yaml
+  # ── ECR Repository ─────────────────────────────────────
+  AppECRRepository:
     Type: AWS::ECR::Repository
     DeletionPolicy: Retain
     Properties:
-      RepositoryName: !Sub "${AWS::StackName}/app"
-      ImageTagMutability: MUTABLE
+      RepositoryName: !Sub '${ProjectName}/app'
+      ImageTagMutability: IMMUTABLE    # Cannot overwrite existing tags
       ImageScanningConfiguration:
-        ScanOnPush: true
+        ScanOnPush: true              # Scan for vulnerabilities on push
       EncryptionConfiguration:
-        EncryptionType: AES256
+        EncryptionType: KMS
+        KmsKey: !GetAtt AppKMSKey.Arn
       LifecyclePolicy:
         LifecyclePolicyText: |
           {
             "rules": [
               {
                 "rulePriority": 1,
-                "description": "Keep last 10 production images",
+                "description": "Keep last 20 tagged images",
                 "selection": {
                   "tagStatus": "tagged",
-                  "tagPrefixList": ["prod"],
+                  "tagPrefixList": ["v"],
                   "countType": "imageCountMoreThan",
-                  "countNumber": 10
+                  "countNumber": 20
                 },
                 "action": {"type": "expire"}
               },
               {
                 "rulePriority": 2,
-                "description": "Delete untagged images older than 7 days",
+                "description": "Expire untagged images older than 7 days",
                 "selection": {
                   "tagStatus": "untagged",
                   "countType": "sinceImagePushed",
@@ -130,391 +335,51 @@ Resources:
             ]
           }
 
-  # ============================================================
-  # SECURITY GROUPS
-  # ============================================================
-  ALBSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
+  # ── Cross-Account ECR Policy ───────────────────────────
+  AppECRRepositoryPolicy:
+    Type: AWS::ECR::RepositoryPolicy
     Properties:
-      GroupDescription: ALB security group
-      VpcId: !ImportValue
-        Fn::Sub: "${NetworkingStack}-VpcId"
-      SecurityGroupIngress:
-        - IpProtocol: tcp
-          FromPort: 80
-          ToPort: 80
-          CidrIp: 0.0.0.0/0
-        - IpProtocol: tcp
-          FromPort: 443
-          ToPort: 443
-          CidrIp: 0.0.0.0/0
-      Tags:
-        - Key: Name
-          Value: !Sub "${AWS::StackName}-alb-sg"
-
-  TaskSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupDescription: ECS task security group
-      VpcId: !ImportValue
-        Fn::Sub: "${NetworkingStack}-VpcId"
-      SecurityGroupIngress:
-        - IpProtocol: tcp
-          FromPort: !Ref ContainerPort
-          ToPort: !Ref ContainerPort
-          SourceSecurityGroupId: !Ref ALBSecurityGroup
-          Description: Traffic from ALB only
-      Tags:
-        - Key: Name
-          Value: !Sub "${AWS::StackName}-task-sg"
-
-  # ============================================================
-  # APPLICATION LOAD BALANCER
-  # ============================================================
-  ALB:
-    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
-    Properties:
-      Name: !Sub "${AWS::StackName}-alb"
-      Type: application
-      Scheme: internet-facing
-      Subnets:
-        - !ImportValue
-          Fn::Sub: "${NetworkingStack}-PublicSubnet1"
-        - !ImportValue
-          Fn::Sub: "${NetworkingStack}-PublicSubnet2"
-      SecurityGroups:
-        - !Ref ALBSecurityGroup
-      LoadBalancerAttributes:
-        - Key: access_logs.s3.enabled
-          Value: !If [IsProd, "true", "false"]
-        - Key: idle_timeout.timeout_seconds
-          Value: "60"
-      Tags:
-        - Key: Environment
-          Value: !Ref Environment
-
-  TargetGroup:
-    Type: AWS::ElasticLoadBalancingV2::TargetGroup
-    Properties:
-      Name: !Sub "${AWS::StackName}-tg"
-      Port: !Ref ContainerPort
-      Protocol: HTTP
-      TargetType: ip    # Required for Fargate
-      VpcId: !ImportValue
-        Fn::Sub: "${NetworkingStack}-VpcId"
-      HealthCheckPath: /health
-      HealthCheckProtocol: HTTP
-      HealthCheckIntervalSeconds: 30
-      HealthyThresholdCount: 2
-      UnhealthyThresholdCount: 3
-      HealthCheckTimeoutSeconds: 10
-      DeregistrationDelay: 30    # Seconds to wait before deregistering
-      TargetGroupAttributes:
-        - Key: stickiness.enabled
-          Value: "false"
-
-  HTTPSListener:
-    Type: AWS::ElasticLoadBalancingV2::Listener
-    Condition: HasCertificate
-    Properties:
-      LoadBalancerArn: !Ref ALB
-      Port: 443
-      Protocol: HTTPS
-      Certificates:
-        - CertificateArn: !Ref CertificateArn
-      DefaultActions:
-        - Type: forward
-          TargetGroupArn: !Ref TargetGroup
-
-  HTTPListener:
-    Type: AWS::ElasticLoadBalancingV2::Listener
-    Properties:
-      LoadBalancerArn: !Ref ALB
-      Port: 80
-      Protocol: HTTP
-      DefaultActions:
-        - !If
-          - HasCertificate
-          - Type: redirect
-            RedirectConfig:
-              Protocol: HTTPS
-              Port: "443"
-              StatusCode: HTTP_301
-          - Type: forward
-            TargetGroupArn: !Ref TargetGroup
-
-  # ============================================================
-  # ECS CLUSTER
-  # ============================================================
-  ECSCluster:
-    Type: AWS::ECS::Cluster
-    Properties:
-      ClusterName: !Sub "${AWS::StackName}-cluster"
-      CapacityProviders:
-        - FARGATE
-        - FARGATE_SPOT
-      DefaultCapacityProviderStrategy:
-        - CapacityProvider: FARGATE
-          Weight: 1
-      ClusterSettings:
-        - Name: containerInsights
-          Value: enabled
-
-  # ============================================================
-  # IAM ROLES FOR ECS
-  # ============================================================
-  TaskExecutionRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: !Sub "${AWS::StackName}-task-execution-role"
-      AssumeRolePolicyDocument:
-        Version: "2012-10-17"
+      RepositoryName: !Ref AppECRRepository
+      PolicyText:
+        Version: '2012-10-17'
         Statement:
-          - Effect: Allow
+          - Sid: CrossAccountPull
+            Effect: Allow
             Principal:
-              Service: ecs-tasks.amazonaws.com
-            Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
-      Policies:
-        - PolicyName: SecretsAndLogs
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              - Effect: Allow
-                Action:
-                  - secretsmanager:GetSecretValue
-                Resource:
-                  - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AWS::StackName}/*"
+              AWS:
+                - !Sub 'arn:aws:iam::${DevAccountId}:root'
+                - !Sub 'arn:aws:iam::${StagingAccountId}:root'
+            Action:
+              - ecr:GetDownloadUrlForLayer
+              - ecr:BatchGetImage
+              - ecr:BatchCheckLayerAvailability
 
-  TaskRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: !Sub "${AWS::StackName}-task-role"
-      AssumeRolePolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: ecs-tasks.amazonaws.com
-            Action: sts:AssumeRole
-      Policies:
-        - PolicyName: AppPermissions
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              - Effect: Allow
-                Action:
-                  - s3:GetObject
-                  - s3:PutObject
-                Resource: !Sub "arn:aws:s3:::${AWS::StackName}-*/*"
-              - Effect: Allow
-                Action:
-                  - sqs:SendMessage
-                  - sqs:ReceiveMessage
-                  - sqs:DeleteMessage
-                Resource: !Sub "arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:${AWS::StackName}-*"
-
-  # ============================================================
-  # CLOUDWATCH LOG GROUP
-  # ============================================================
-  AppLogGroup:
-    Type: AWS::Logs::LogGroup
-    Properties:
-      LogGroupName: !Sub "/ecs/${AWS::StackName}"
-      RetentionInDays: !If [IsProd, 30, 7]
-
-  # ============================================================
-  # ECS TASK DEFINITION
-  # ============================================================
-  TaskDefinition:
-    Type: AWS::ECS::TaskDefinition
-    Properties:
-      Family: !Sub "${AWS::StackName}-app"
-      RequiresCompatibilities:
-        - FARGATE
-      NetworkMode: awsvpc    # Required for Fargate
-      Cpu: !Ref TaskCpu
-      Memory: !Ref TaskMemory
-      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
-      TaskRoleArn: !GetAtt TaskRole.Arn
-      ContainerDefinitions:
-        - Name: app
-          Image: !Ref ImageUri
-          Essential: true
-          PortMappings:
-            - ContainerPort: !Ref ContainerPort
-              Protocol: tcp
-          Environment:
-            - Name: ENVIRONMENT
-              Value: !Ref Environment
-            - Name: PORT
-              Value: !Sub "${ContainerPort}"
-          # Pull secrets from Secrets Manager at task start
-          Secrets:
-            - Name: DB_PASSWORD
-              ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AWS::StackName}/db:password::"
-            - Name: JWT_SECRET
-              ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AWS::StackName}/jwt:secret::"
-          LogConfiguration:
-            LogDriver: awslogs
-            Options:
-              awslogs-group: !Ref AppLogGroup
-              awslogs-region: !Ref AWS::Region
-              awslogs-stream-prefix: app
-          HealthCheck:
-            Command:
-              - CMD-SHELL
-              - !Sub "curl -f http://localhost:${ContainerPort}/health || exit 1"
-            Interval: 30
-            Timeout: 5
-            Retries: 3
-            StartPeriod: 60
-          ReadonlyRootFilesystem: false
-          User: "1000"    # Non-root user
-
-  # ============================================================
-  # ECS SERVICE
-  # ============================================================
-  ECSService:
-    Type: AWS::ECS::Service
-    DependsOn:
-      - HTTPListener
-    Properties:
-      ServiceName: !Sub "${AWS::StackName}-service"
-      Cluster: !Ref ECSCluster
-      TaskDefinition: !Ref TaskDefinition
-      LaunchType: FARGATE
-      DesiredCount: !Ref DesiredCount
-      DeploymentConfiguration:
-        MinimumHealthyPercent: 100
-        MaximumPercent: 200
-        DeploymentCircuitBreaker:
-          Enable: true
-          Rollback: true
-      NetworkConfiguration:
-        AwsvpcConfiguration:
-          AssignPublicIp: DISABLED
-          SecurityGroups:
-            - !Ref TaskSecurityGroup
-          Subnets:
-            - !ImportValue
-              Fn::Sub: "${NetworkingStack}-PrivateSubnet1"
-            - !ImportValue
-              Fn::Sub: "${NetworkingStack}-PrivateSubnet2"
-      LoadBalancers:
-        - ContainerName: app
-          ContainerPort: !Ref ContainerPort
-          TargetGroupArn: !Ref TargetGroup
-      EnableExecuteCommand: !If [IsProd, false, true]  # ECS Exec for dev
-      Tags:
-        - Key: Environment
-          Value: !Ref Environment
-
-  # ============================================================
-  # AUTO SCALING
-  # ============================================================
-  ScalableTarget:
-    Type: AWS::ApplicationAutoScaling::ScalableTarget
-    Properties:
-      MaxCapacity: !If [IsProd, 10, 4]
-      MinCapacity: !If [IsProd, 2, 1]
-      ResourceId: !Sub "service/${ECSCluster}/${ECSService.Name}"
-      RoleARN: !Sub "arn:aws:iam::${AWS::AccountId}:role/aws-service-role/ecs.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_ECSService"
-      ScalableDimension: ecs:service:DesiredCount
-      ServiceNamespace: ecs
-
-  CPUScalingPolicy:
-    Type: AWS::ApplicationAutoScaling::ScalingPolicy
-    Properties:
-      PolicyName: !Sub "${AWS::StackName}-cpu-scaling"
-      PolicyType: TargetTrackingScaling
-      ScalingTargetId: !Ref ScalableTarget
-      TargetTrackingScalingPolicyConfiguration:
-        PredefinedMetricSpecification:
-          PredefinedMetricType: ECSServiceAverageCPUUtilization
-        TargetValue: 70.0
-        ScaleInCooldown: 300
-        ScaleOutCooldown: 60
-
-# ============================================================
-# OUTPUTS
-# ============================================================
 Outputs:
-  ServiceUrl:
-    Description: Application URL
-    Value: !Sub
-      - "http${Https}://${DNS}"
-      - Https: !If [HasCertificate, "s", ""]
-        DNS: !GetAtt ALB.DNSName
-
   ClusterName:
     Value: !Ref ECSCluster
     Export:
-      Name: !Sub "${AWS::StackName}-ClusterName"
+      Name: !Sub '${AWS::StackName}-ClusterName'
 
   ServiceName:
-    Value: !GetAtt ECSService.Name
+    Value: !GetAtt AppService.Name
     Export:
-      Name: !Sub "${AWS::StackName}-ServiceName"
+      Name: !Sub '${AWS::StackName}-ServiceName'
 
   ECRRepositoryUri:
-    Value: !GetAtt ECRRepository.RepositoryUri
+    Value: !GetAtt AppECRRepository.RepositoryUri
     Export:
-      Name: !Sub "${AWS::StackName}-ECRUri"
+      Name: !Sub '${AWS::StackName}-ECRRepositoryUri'
 ```
 
 ---
 
-## 6.3 Deploying
-
-```bash
-# Lint
-cfn-lint container-stack.yaml
-
-# Deploy (requires networking stack deployed first)
-aws cloudformation deploy \
-  --template-file container-stack.yaml \
-  --stack-name myapp-containers-dev \
-  --parameter-overrides \
-    Environment=dev \
-    NetworkingStack=myapp-networking \
-    ImageUri=nginx:latest \
-  --capabilities CAPABILITY_NAMED_IAM \
-  --region us-east-1
-
-# Get the service URL
-aws cloudformation describe-stacks \
-  --stack-name myapp-containers-dev \
-  --query "Stacks[0].Outputs[?OutputKey=='ServiceUrl'].OutputValue" \
-  --output text
-
-# Push a new image (GitHub Actions or manually)
-ECR_URI=$(aws cloudformation describe-stacks \
-  --stack-name myapp-containers-dev \
-  --query "Stacks[0].Outputs[?OutputKey=='ECRRepositoryUri'].OutputValue" \
-  --output text)
-
-aws ecr get-login-password | docker login --username AWS --password-stdin $ECR_URI
-docker build -t $ECR_URI:latest .
-docker push $ECR_URI:latest
-
-# Force new deployment (pull latest image)
-aws ecs update-service \
-  --cluster myapp-containers-dev-cluster \
-  --service myapp-containers-dev-service \
-  --force-new-deployment
-```
-
----
-
-## 6.4 Interview Questions
+## 6.3 Interview Q&A
 
 **Q: What is the difference between TaskExecutionRole and TaskRole in ECS?**
-> The `TaskExecutionRole` is used by the ECS agent to set up the task — pulling the Docker image from ECR, retrieving secrets from Secrets Manager to inject as environment variables, and writing logs to CloudWatch. The `TaskRole` is used by your application code running inside the container — it defines what AWS APIs your app can call (S3, SQS, DynamoDB, etc.). Both are required, both are IAM roles, but they're assumed by different actors: ECS infrastructure vs your application.
+A: TaskExecutionRole is used by the ECS agent on your behalf to pull Docker images from ECR, push logs to CloudWatch, and retrieve secrets from Secrets Manager/SSM for injection as environment variables at task startup. TaskRole is the IAM role your application container assumes at runtime — used for calls to DynamoDB, S3, SQS, etc. Principle of least privilege: TaskExecutionRole has ECR + CloudWatch + Secrets access; TaskRole has only your app's specific permissions. The container uses TaskRole's credentials via the container metadata endpoint (IMDSv1-equivalent for containers).
 
-**Q: What does `DeploymentCircuitBreaker` do?**
-> The circuit breaker monitors ECS service deployments. If new tasks keep failing to start (failing health checks, crashing), it stops the deployment and automatically rolls back to the previous working task definition — rather than letting a bad deploy drain all healthy tasks. Without it, a bad deployment could bring down the entire service before anyone notices. It's enabled with `Enable: true, Rollback: true` and is a simple best practice for every ECS service.
+**Q: What does DeploymentCircuitBreaker do in ECS?**
+A: It monitors new task deployments and automatically rolls back if tasks fail to reach a RUNNING state (e.g., container crashes on startup, health check failures). Without it, a bad deployment would leave old tasks running but eventually drain them and leave the service with 0 healthy tasks. With `Rollback: true`, ECS detects the failure and re-deploys the previous task definition version. This prevents bad deployments from causing service outages. Combined with the `MinimumHealthyPercent: 100` deployment configuration, it ensures zero-downtime rollbacks.
 
-**Q: Why set `AssignPublicIp: DISABLED` for Fargate tasks?**
-> Fargate tasks in private subnets should never have public IPs. They access the internet through NAT Gateways (for outbound), and incoming traffic only arrives from the ALB (which is in the public subnet and routes to tasks via private IPs). Assigning public IPs to tasks would expose them directly to the internet, bypassing the ALB, WAF, and security group protection. Private subnets + no public IP + ALB in front is the correct architecture.
+**Q: What is ECS Service Connect and how does it differ from Service Discovery?**
+A: Service Discovery (Cloud Map) creates DNS records for services — other services resolve them via DNS. Latency: DNS TTL causes stale IPs, no load balancing at DNS level. Service Connect is a newer feature that injects an Envoy proxy sidecar into each task, providing service-to-service load balancing, retries, circuit breaking, and metrics without code changes. Service Connect proxies route traffic and report CloudWatch metrics per service. Use Service Connect for new deployments; it provides better observability and resilience than DNS-based discovery.

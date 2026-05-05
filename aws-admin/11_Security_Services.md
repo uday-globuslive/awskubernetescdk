@@ -1,470 +1,756 @@
-# Chapter 11: Security Services
-## KMS, Secrets Manager, WAF, Shield, GuardDuty, Security Hub & More
+# Chapter 11: Security Services — KMS, Secrets Manager, WAF, GuardDuty & More
+## Encryption, Secrets Management, Threat Detection, and Security Posture
 
 ---
 
-## 11.1 Security Services Overview
+## 11.1 AWS Security Services Overview
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                  AWS SECURITY SERVICES                       │
-├──────────────────────────┬───────────────────────────────────┤
-│ DATA PROTECTION          │ KMS — encryption keys             │
-│                          │ Secrets Manager — passwords/certs │
-│                          │ Certificate Manager (ACM) — SSL   │
-│                          │ Macie — PII in S3 discovery       │
-├──────────────────────────┼───────────────────────────────────┤
-│ NETWORK PROTECTION       │ WAF — web application firewall    │
-│                          │ Shield — DDoS protection          │
-│                          │ Firewall Manager — central rules  │
-├──────────────────────────┼───────────────────────────────────┤
-│ THREAT DETECTION         │ GuardDuty — threat intelligence   │
-│                          │ Inspector — vulnerability scanning│
-│                          │ Detective — security investigation│
-├──────────────────────────┼───────────────────────────────────┤
-│ COMPLIANCE & GOVERNANCE  │ Security Hub — central dashboard  │
-│                          │ AWS Config — compliance rules     │
-│                          │ Audit Manager — audit evidence    │
-└──────────────────────────┴───────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────┐
+│                  AWS SECURITY SERVICES                             │
+├─────────────────────┬──────────────────────────────────────────────┤
+│ KMS                 │ Key management, encryption at rest           │
+│ ACM                 │ SSL/TLS certificate provisioning             │
+│ Secrets Manager     │ Secrets rotation and storage                 │
+│ SSM Parameter Store │ Configuration and secrets storage            │
+├─────────────────────┼──────────────────────────────────────────────┤
+│ IAM (Ch2)          │ Identity and access management               │
+│ Organizations       │ Multi-account governance, SCPs               │
+│ Control Tower       │ Multi-account setup automation               │
+│ Macie               │ S3 sensitive data discovery (PII)            │
+├─────────────────────┼──────────────────────────────────────────────┤
+│ WAF                 │ Web application firewall (L7)                │
+│ Shield Standard     │ DDoS protection (automatic, free)           │
+│ Shield Advanced     │ Enhanced DDoS + 24/7 DRT team ($3000/mo)    │
+│ Firewall Manager    │ Centralize WAF/SG/NACL management           │
+├─────────────────────┼──────────────────────────────────────────────┤
+│ GuardDuty           │ Threat detection, anomaly ML                 │
+│ Security Hub        │ Security findings aggregation, standards     │
+│ Inspector           │ Vulnerability assessment (EC2, Lambda, ECR) │
+│ Detective           │ Threat investigation and visualization       │
+│ CloudTrail (Ch10)  │ API audit logging                            │
+│ Config (Ch10)      │ Resource compliance and change history       │
+└─────────────────────┴──────────────────────────────────────────────┘
 ```
 
 ---
 
 ## 11.2 KMS — Key Management Service
 
-KMS manages cryptographic keys for encrypting data.
-
-```
-┌──────────────────────────────────────────────────────────┐
-│                  HOW KMS WORKS                           │
-│                                                          │
-│  You don't handle raw keys — KMS does                    │
-│                                                          │
-│  Your App                 KMS                            │
-│  ─────────                ───                            │
-│  "Encrypt this data" ──► KMS encrypts using CMK          │
-│  "Decrypt this data" ──► KMS decrypts (checks IAM)      │
-│                                                          │
-│  KMS Master Key (CMK/KMS Key) never leaves KMS           │
-│  You only see ciphertext                                 │
-│                                                          │
-│  Every AWS service (S3, EBS, RDS) can use KMS keys      │
-└──────────────────────────────────────────────────────────┘
-```
-
 ### Key Types
 
 ```
-AWS Managed Keys:
-• Automatically created by services (e.g., aws/s3, aws/rds)
-• No cost, no management needed
-• You can see but not control them
+KMS Key Types:
+  Customer Managed Keys (CMK):  You create and manage, $1/month/key
+  AWS Managed Keys:             AWS creates/manages per service (e.g., aws/s3), free
+  AWS Owned Keys:               AWS-owned, used by some services, not visible to you
 
-Customer Managed Keys (CMK):
-• You create and control them
-• $1/month per key
-• Can define key policy (who can use/manage the key)
-• Support key rotation, deletion with waiting period
-• Use for compliance requirements
+Key Material Origin:
+  AWS_KMS:    KMS generates key material (default)
+  EXTERNAL:   You import your own key material
+  AWS_CLOUDHSM: Key material in CloudHSM cluster
+
+Key Spec:
+  SYMMETRIC_DEFAULT: AES-256-GCM (most use cases)
+  RSA_2048/4096:     Asymmetric, sign/verify or encrypt/decrypt
+  ECC_NIST_P256/384/521: ECDSA for signing
+  HMAC_256/384/512:  Generate/verify HMAC tokens
 ```
 
-### KMS CLI
+### Key Management
 
 ```bash
-# Create a symmetric key
+# Create symmetric CMK
 KEY_ID=$(aws kms create-key \
-  --description "MyApp encryption key" \
+  --description "Production database encryption key" \
   --key-usage ENCRYPT_DECRYPT \
-  --query KeyMetadata.KeyId --output text)
+  --origin AWS_KMS \
+  --enable-key-rotation \     # Auto-rotate annually
+  --tags TagKey=Environment,TagValue=prod TagKey=Service,TagValue=database \
+  --query "KeyMetadata.KeyId" --output text)
 
-# Create an alias for the key
+# Create key alias (human-readable name)
 aws kms create-alias \
-  --alias-name alias/myapp-key \
+  --alias-name alias/prod-db-key \
   --target-key-id $KEY_ID
 
-# Encrypt data
+# Create key policy (grant permissions)
+aws kms put-key-policy \
+  --key-id $KEY_ID \
+  --policy-name default \
+  --policy '{
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Sid": "Enable IAM User Permissions",
+        "Effect": "Allow",
+        "Principal": {"AWS": "arn:aws:iam::123456789012:root"},
+        "Action": "kms:*",
+        "Resource": "*"
+      },
+      {
+        "Sid": "Allow key administration",
+        "Effect": "Allow",
+        "Principal": {"AWS": "arn:aws:iam::123456789012:role/KeyAdmins"},
+        "Action": ["kms:Create*","kms:Describe*","kms:Enable*","kms:List*",
+                   "kms:Put*","kms:Update*","kms:Revoke*","kms:Disable*",
+                   "kms:Get*","kms:Delete*","kms:ScheduleKeyDeletion","kms:CancelKeyDeletion"],
+        "Resource": "*"
+      },
+      {
+        "Sid": "Allow key usage by application role",
+        "Effect": "Allow",
+        "Principal": {"AWS": "arn:aws:iam::123456789012:role/AppRole"},
+        "Action": ["kms:Encrypt","kms:Decrypt","kms:ReEncrypt*","kms:GenerateDataKey*","kms:DescribeKey"],
+        "Resource": "*",
+        "Condition": {
+          "StringEquals": {
+            "kms:ViaService": ["rds.us-east-1.amazonaws.com", "secretsmanager.us-east-1.amazonaws.com"]
+          }
+        }
+      }
+    ]
+  }'
+
+# Encrypt data directly
 aws kms encrypt \
-  --key-id alias/myapp-key \
-  --plaintext "my-secret-value" \
-  --query CiphertextBlob --output text | base64 --decode > encrypted.bin
-
-# Decrypt data
-aws kms decrypt \
-  --ciphertext-blob fileb://encrypted.bin \
-  --query Plaintext --output text | base64 --decode
-
-# Enable automatic key rotation (every year)
-aws kms enable-key-rotation --key-id $KEY_ID
-```
-
-```python
-# Python: encrypt/decrypt with KMS
-import boto3, base64
-
-kms = boto3.client("kms", region_name="us-east-1")
-
-# Encrypt
-response = kms.encrypt(
-    KeyId="alias/myapp-key",
-    Plaintext=b"my-secret-password"
-)
-ciphertext = base64.b64encode(response["CiphertextBlob"]).decode()
+  --key-id alias/prod-db-key \
+  --plaintext "my-secret-data" \
+  --encryption-context Purpose=PasswordEncryption,Service=my-app \
+  --query "CiphertextBlob" --output text | base64 -d > encrypted.bin
 
 # Decrypt
-response = kms.decrypt(
-    CiphertextBlob=base64.b64decode(ciphertext)
-)
-plaintext = response["Plaintext"].decode()
+aws kms decrypt \
+  --ciphertext-blob fileb://encrypted.bin \
+  --encryption-context Purpose=PasswordEncryption,Service=my-app \
+  --query "Plaintext" --output text | base64 -d
+
+# Generate data key (for client-side encryption — envelope encryption)
+aws kms generate-data-key \
+  --key-id alias/prod-db-key \
+  --key-spec AES_256 \
+  --encryption-context Service=my-app
+# Returns: Plaintext key (use to encrypt data, then discard)
+#          CiphertextBlob (store alongside encrypted data)
 ```
 
-### Key Policy (who can use the key)
+### Envelope Encryption Pattern
 
-```json
-{
-  "Statement": [
-    {
-      "Sid": "Allow root full control",
-      "Effect": "Allow",
-      "Principal": {"AWS": "arn:aws:iam::123456789012:root"},
-      "Action": "kms:*",
-      "Resource": "*"
-    },
-    {
-      "Sid": "Allow Lambda to use key for encrypt/decrypt",
-      "Effect": "Allow",
-      "Principal": {"AWS": "arn:aws:iam::123456789012:role/lambda-role"},
-      "Action": ["kms:Encrypt", "kms:Decrypt", "kms:GenerateDataKey"],
-      "Resource": "*"
-    },
-    {
-      "Sid": "Allow RDS to use key",
-      "Effect": "Allow",
-      "Principal": {"Service": "rds.amazonaws.com"},
-      "Action": ["kms:Encrypt", "kms:Decrypt", "kms:GenerateDataKey*"],
-      "Resource": "*"
+```python
+import boto3
+import os
+import json
+import base64
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+kms = boto3.client('kms')
+KEY_ARN = 'arn:aws:kms:us-east-1:123:key/abc-123'
+
+def encrypt_data(plaintext: bytes, context: dict) -> dict:
+    """Envelope encryption: KMS generates data key, we encrypt locally."""
+    
+    # Get data key from KMS
+    response = kms.generate_data_key(
+        KeyId=KEY_ARN,
+        KeySpec='AES_256',
+        EncryptionContext=context
+    )
+    
+    plaintext_key = response['Plaintext']
+    encrypted_key = response['CiphertextBlob']
+    
+    # Use plaintext key to encrypt data locally (faster, cheaper)
+    nonce = os.urandom(12)
+    aesgcm = AESGCM(plaintext_key)
+    ciphertext = aesgcm.encrypt(nonce, plaintext, json.dumps(context).encode())
+    
+    # Discard plaintext key immediately
+    del plaintext_key
+    
+    return {
+        'encrypted_key': base64.b64encode(encrypted_key).decode(),
+        'nonce': base64.b64encode(nonce).decode(),
+        'ciphertext': base64.b64encode(ciphertext).decode(),
+        'context': context
     }
-  ]
-}
+
+def decrypt_data(encrypted_package: dict) -> bytes:
+    """Decrypt envelope-encrypted data."""
+    
+    context = encrypted_package['context']
+    encrypted_key = base64.b64decode(encrypted_package['encrypted_key'])
+    nonce = base64.b64decode(encrypted_package['nonce'])
+    ciphertext = base64.b64decode(encrypted_package['ciphertext'])
+    
+    # Decrypt data key with KMS
+    response = kms.decrypt(
+        CiphertextBlob=encrypted_key,
+        EncryptionContext=context
+    )
+    plaintext_key = response['Plaintext']
+    
+    # Decrypt data locally
+    aesgcm = AESGCM(plaintext_key)
+    return aesgcm.decrypt(nonce, ciphertext, json.dumps(context).encode())
 ```
 
 ---
 
-## 11.3 Secrets Manager
+## 11.3 AWS Secrets Manager
 
-Secrets Manager stores and auto-rotates database passwords, API keys, and other secrets.
-
-```
-Without Secrets Manager:          With Secrets Manager:
-Hard-coded in code ❌              Retrieve at runtime ✅
-In .env file on server ❌         Auto-rotated ✅
-In CI/CD environment vars ❌      Encrypted with KMS ✅
-Manually rotated (if ever) ❌     Audit trail in CloudTrail ✅
-```
+Secrets Manager stores, rotates, and retrieves secrets automatically.
 
 ```bash
-# Store a secret
+# Create secret (password)
 aws secretsmanager create-secret \
-  --name myapp/prod/db-credentials \
-  --description "Production database credentials" \
-  --secret-string '{
-    "host": "my-db.abc123.us-east-1.rds.amazonaws.com",
-    "port": 5432,
-    "username": "admin",
-    "password": "SecurePass123!"
-  }' \
-  --kms-key-id alias/myapp-key
+  --name prod/database/password \
+  --description "Production RDS PostgreSQL password" \
+  --secret-string '{"username":"dbadmin","password":"MySecurePass123!"}' \
+  --kms-key-id alias/prod-secrets-key \
+  --tags Key=Environment,Value=prod Key=Service,Value=database
 
-# Retrieve secret
+# Create secret (API key)
+aws secretsmanager create-secret \
+  --name prod/stripe/api-key \
+  --secret-string "sk_live_abc123xyz"
+
+# Get secret value
 aws secretsmanager get-secret-value \
-  --secret-id myapp/prod/db-credentials \
-  --query SecretString --output text
+  --secret-id prod/database/password \
+  --query "SecretString" --output text | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['password'])"
 
-# Update secret (new password after rotation)
-aws secretsmanager update-secret \
-  --secret-id myapp/prod/db-credentials \
-  --secret-string '{"password": "NewSecurePass456!"}'
-
-# Enable automatic rotation (Lambda function rotates DB password)
+# Rotate secret immediately
 aws secretsmanager rotate-secret \
-  --secret-id myapp/prod/db-credentials \
-  --rotation-lambda-arn arn:aws:lambda:...:function:rotate-db-secret \
+  --secret-id prod/database/password \
+  --rotation-lambda-arn arn:aws:lambda:us-east-1:123:function:rotate-db-password \
   --rotation-rules AutomaticallyAfterDays=30
+
+# Enable automatic rotation
+aws secretsmanager rotate-secret \
+  --secret-id prod/database/password \
+  --rotation-lambda-arn arn:aws:lambda:us-east-1:123:function:rotate-db-password \
+  --rotation-rules ScheduleExpression="rate(30 days)"
 ```
+
+### Python Secrets Manager Integration
 
 ```python
-# Retrieve secrets in Python
-import boto3, json
+import boto3
+import json
+from functools import lru_cache
+from botocore.exceptions import ClientError
 
+secretsmanager = boto3.client('secretsmanager')
+
+@lru_cache(maxsize=None)
 def get_secret(secret_name: str) -> dict:
-    client = boto3.client("secretsmanager", region_name="us-east-1")
-    response = client.get_secret_value(SecretId=secret_name)
-    return json.loads(response["SecretString"])
+    """Get secret with caching (cache in Lambda execution environment)."""
+    try:
+        response = secretsmanager.get_secret_value(SecretId=secret_name)
+        
+        if 'SecretString' in response:
+            return json.loads(response['SecretString'])
+        else:
+            # Binary secret
+            return response['SecretBinary']
+    
+    except ClientError as e:
+        error_code = e.response['Error']['Code']
+        if error_code == 'ResourceNotFoundException':
+            raise KeyError(f"Secret {secret_name} not found")
+        elif error_code == 'AccessDeniedException':
+            raise PermissionError(f"No access to secret {secret_name}")
+        raise
 
-# Use at startup (cache in memory — don't call on every request)
-db_creds = get_secret("myapp/prod/db-credentials")
-DB_URL = f"postgresql://{db_creds['username']}:{db_creds['password']}@{db_creds['host']}/{db_creds['dbname']}"
+# Usage in Lambda (fast — cached after first invocation)
+def get_db_connection():
+    secret = get_secret('prod/database/password')
+    import psycopg2
+    return psycopg2.connect(
+        host=os.environ['DB_HOST'],
+        database='appdb',
+        user=secret['username'],
+        password=secret['password'],
+        sslmode='require'
+    )
+
+# Auto-rotation Lambda (AWS provides templates)
+def rotate_secret(event, context):
+    """Lambda for custom secret rotation."""
+    secret_id = event['SecretId']
+    token = event['ClientRequestToken']
+    step = event['Step']
+    
+    if step == 'createSecret':
+        # Create new version of secret
+        new_password = generate_secure_password()
+        secretsmanager.put_secret_value(
+            SecretId=secret_id,
+            ClientRequestToken=token,
+            SecretString=json.dumps({'username': 'dbadmin', 'password': new_password}),
+            VersionStages=['AWSPENDING']
+        )
+    
+    elif step == 'setSecret':
+        # Apply new password to the database
+        pending = secretsmanager.get_secret_value(
+            SecretId=secret_id, VersionStage='AWSPENDING'
+        )
+        new_creds = json.loads(pending['SecretString'])
+        update_database_password(new_creds['password'])
+    
+    elif step == 'testSecret':
+        # Test that new credentials work
+        test_login_with_new_creds(secret_id, token)
+    
+    elif step == 'finishSecret':
+        # Mark new version as current
+        metadata = secretsmanager.describe_secret(SecretId=secret_id)
+        current_version = next(v for v, s in metadata['VersionIdsToStages'].items()
+                               if 'AWSCURRENT' in s)
+        secretsmanager.update_secret_version_stage(
+            SecretId=secret_id,
+            VersionStage='AWSCURRENT',
+            MoveToVersionId=token,
+            RemoveFromVersionId=current_version
+        )
 ```
 
-### Parameter Store vs Secrets Manager
+### Secrets Manager vs SSM Parameter Store
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│      SECRETS MANAGER vs PARAMETER STORE (SSM)           │
-├────────────────────────┬─────────────────────────────────┤
-│ Secrets Manager        │ Parameter Store                  │
-├────────────────────────┼─────────────────────────────────┤
-│ Auto rotation          │ No auto rotation                 │
-│ $0.40/secret/month     │ Free (standard tier)             │
-│ Purpose-built secrets  │ Config + non-sensitive data     │
-│ Cross-account access   │ Within account only              │
-│ Use for DB passwords,  │ Use for feature flags, URLs,    │
-│ API keys, certs        │ config values, non-secrets      │
-└────────────────────────┴─────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│           SECRETS MANAGER vs SSM PARAMETER STORE                 │
+├─────────────────────┬──────────────────────┬─────────────────────┤
+│ Feature             │ Secrets Manager      │ Parameter Store     │
+├─────────────────────┼──────────────────────┼─────────────────────┤
+│ Cost                │ $0.40/secret/month   │ Free (Standard)     │
+│                     │ + $0.05/10K API calls│ $0.05/Advanced      │
+├─────────────────────┼──────────────────────┼─────────────────────┤
+│ Auto-rotation       │ Yes (Lambda-based)   │ No                  │
+├─────────────────────┼──────────────────────┼─────────────────────┤
+│ Cross-account       │ Yes                  │ No                  │
+├─────────────────────┼──────────────────────┼─────────────────────┤
+│ Max value size      │ 65,536 bytes         │ 4KB (Standard)      │
+│                     │                      │ 8KB (Advanced)      │
+├─────────────────────┼──────────────────────┼─────────────────────┤
+│ Versioning          │ Yes (staging labels) │ Yes                 │
+├─────────────────────┼──────────────────────┼─────────────────────┤
+│ Encryption          │ KMS (required)       │ KMS (optional)      │
+├─────────────────────┼──────────────────────┼─────────────────────┤
+│ Best for            │ Credentials that     │ Config, non-secret  │
+│                     │ need rotation        │ parameters, flags   │
+└─────────────────────┴──────────────────────┴─────────────────────┘
 ```
 
 ```bash
-# Parameter Store
+# SSM Parameter Store
+# Standard string (free)
 aws ssm put-parameter \
-  --name "/myapp/prod/api-url" \
-  --value "https://api.example.com" \
-  --type String
+  --name /prod/app/config \
+  --value '{"debug": false, "max_connections": 100}' \
+  --type String \
+  --tags Key=Environment,Value=prod
 
+# Secure string (encrypted with KMS, $0.05/advanced param)
 aws ssm put-parameter \
-  --name "/myapp/prod/db-password" \
-  --value "SecurePass123!" \
+  --name /prod/api/key \
+  --value "my-api-key-value" \
   --type SecureString \
-  --key-id alias/myapp-key
+  --key-id alias/prod-ssm-key \
+  --tier Advanced     # For > 4KB or parameter policies
 
+# Get parameter
 aws ssm get-parameter \
-  --name "/myapp/prod/db-password" \
+  --name /prod/api/key \
   --with-decryption \
-  --query Parameter.Value
+  --query "Parameter.Value" --output text
+
+# Get multiple parameters
+aws ssm get-parameters-by-path \
+  --path /prod/app/ \
+  --with-decryption \
+  --recursive
 ```
 
 ---
 
 ## 11.4 WAF — Web Application Firewall
 
-WAF protects web applications from common exploits (SQL injection, XSS, DDoS at Layer 7).
-
-```
-Internet → CloudFront / ALB / API Gateway
-                │
-              WAF Rules:
-                │ ✅ Allow legitimate traffic
-                │ ❌ Block: SQL injection
-                │ ❌ Block: XSS attempts
-                │ ❌ Block: Bad bots
-                │ ❌ Block: Specific countries
-                │ ❌ Rate limit: > 1000 req/5min from one IP
-                ▼
-           Your Application
-```
+WAF protects web applications from common exploits (SQLi, XSS, etc.) and blocks malicious IPs.
 
 ```bash
-# Create WAF WebACL
-aws wafv2 create-web-acl \
-  --name MyAppWAF \
-  --scope CLOUDFRONT \
-  --region us-east-1 \
+# Create WebACL
+WEB_ACL_ID=$(aws wafv2 create-web-acl \
+  --name prod-web-acl \
+  --scope REGIONAL \             # CLOUDFRONT for CloudFront, REGIONAL for ALB/API GW
   --default-action Allow={} \
+  --visibility-config SampledRequestsEnabled=true,CloudWatchMetricsEnabled=true,MetricName=prod-web-acl \
   --rules '[
     {
       "Name": "AWSManagedRulesCommonRuleSet",
-      "Priority": 1,
-      "OverrideAction": {"None": {}},
-      "VisibilityConfig": {
-        "SampledRequestsEnabled": true,
-        "CloudWatchMetricsEnabled": true,
-        "MetricName": "CommonRuleSet"
-      },
+      "Priority": 10,
       "Statement": {
         "ManagedRuleGroupStatement": {
           "VendorName": "AWS",
           "Name": "AWSManagedRulesCommonRuleSet"
         }
+      },
+      "OverrideAction": {"None": {}},
+      "VisibilityConfig": {
+        "SampledRequestsEnabled": true,
+        "CloudWatchMetricsEnabled": true,
+        "MetricName": "CommonRuleSet"
+      }
+    },
+    {
+      "Name": "AWSManagedRulesKnownBadInputsRuleSet",
+      "Priority": 20,
+      "Statement": {
+        "ManagedRuleGroupStatement": {
+          "VendorName": "AWS",
+          "Name": "AWSManagedRulesKnownBadInputsRuleSet"
+        }
+      },
+      "OverrideAction": {"None": {}},
+      "VisibilityConfig": {
+        "SampledRequestsEnabled": true,
+        "CloudWatchMetricsEnabled": true,
+        "MetricName": "KnownBadInputs"
       }
     },
     {
       "Name": "RateLimitRule",
-      "Priority": 2,
+      "Priority": 30,
+      "Statement": {
+        "RateBasedStatement": {
+          "Limit": 1000,
+          "AggregateKeyType": "IP",
+          "ScopeDownStatement": {
+            "ByteMatchStatement": {
+              "SearchString": "/api/",
+              "FieldToMatch": {"UriPath": {}},
+              "TextTransformations": [{"Priority": 0, "Type": "NONE"}],
+              "PositionalConstraint": "STARTS_WITH"
+            }
+          }
+        }
+      },
       "Action": {"Block": {}},
       "VisibilityConfig": {
         "SampledRequestsEnabled": true,
         "CloudWatchMetricsEnabled": true,
         "MetricName": "RateLimit"
-      },
+      }
+    },
+    {
+      "Name": "GeoBlockRule",
+      "Priority": 40,
       "Statement": {
-        "RateBasedStatement": {
-          "Limit": 1000,
-          "AggregateKeyType": "IP"
+        "GeoMatchStatement": {
+          "CountryCodes": ["KP", "IR", "CU", "SD"]
         }
+      },
+      "Action": {"Block": {}},
+      "VisibilityConfig": {
+        "SampledRequestsEnabled": true,
+        "CloudWatchMetricsEnabled": true,
+        "MetricName": "GeoBlock"
       }
     }
   ]' \
-  --visibility-config SampledRequestsEnabled=true,CloudWatchMetricsEnabled=true,MetricName=MyAppWAF
-```
+  --region us-east-1 \
+  --query "Summary.Id" --output text)
 
-### AWS Managed Rule Groups
+# Associate WebACL with ALB
+aws wafv2 associate-web-acl \
+  --web-acl-arn arn:aws:wafv2:us-east-1:123:regional/webacl/prod-web-acl/$WEB_ACL_ID \
+  --resource-arn arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/app/my-alb/abc
 
-```
-AWSManagedRulesCommonRuleSet        → General protection (XSS, SQLi, etc.)
-AWSManagedRulesAmazonIpReputationList → Known bad IPs
-AWSManagedRulesAnonymousIpList      → Tor exits, VPNs, proxies
-AWSManagedRulesSQLiRuleSet          → SQL injection specifically
-AWSManagedRulesLinuxRuleSet         → Linux-specific attacks
-AWSManagedRulesBotControlRuleSet    → Bot traffic filtering
+# Create IP set (allow/block specific IPs)
+aws wafv2 create-ip-set \
+  --name blocked-ips \
+  --scope REGIONAL \
+  --ip-address-version IPV4 \
+  --addresses "203.0.113.0/24" "198.51.100.5/32"
+
+# Add IP set rule to WebACL (block all IPs in set)
+aws wafv2 update-web-acl \
+  --id $WEB_ACL_ID \
+  --name prod-web-acl \
+  --scope REGIONAL \
+  --default-action Allow={} \
+  --lock-token $(aws wafv2 get-web-acl --id $WEB_ACL_ID --name prod-web-acl --scope REGIONAL --query "LockToken" --output text) \
+  --rules '[{
+    "Name": "BlockIPSet",
+    "Priority": 5,
+    "Statement": {
+      "IPSetReferenceStatement": {
+        "ARN": "arn:aws:wafv2:us-east-1:123:regional/ipset/blocked-ips/xyz"
+      }
+    },
+    "Action": {"Block": {}},
+    "VisibilityConfig": {
+      "SampledRequestsEnabled": true,
+      "CloudWatchMetricsEnabled": true,
+      "MetricName": "BlockIPSet"
+    }
+  }]'
 ```
 
 ---
 
-## 11.5 Shield — DDoS Protection
+## 11.5 GuardDuty — Threat Detection
 
-```
-┌──────────────────────────────────────────────────────────┐
-│              AWS SHIELD TIERS                            │
-├────────────────────────┬─────────────────────────────────┤
-│ Shield Standard        │ Free, automatic                  │
-│                        │ Layer 3/4 DDoS protection        │
-│                        │ Covers EC2, ELB, CloudFront,    │
-│                        │ Route53 automatically            │
-├────────────────────────┼─────────────────────────────────┤
-│ Shield Advanced        │ $3000/month (+ data transfer)   │
-│                        │ Layer 7 protection               │
-│                        │ 24/7 DDoS Response Team (DRT)   │
-│                        │ Financial protection (no bill   │
-│                        │ spike from DDoS scaling costs)  │
-│                        │ Real-time attack visibility      │
-│                        │ For: financial, gaming, media   │
-└────────────────────────┴─────────────────────────────────┘
-```
-
----
-
-## 11.6 GuardDuty — Threat Detection
-
-GuardDuty uses ML to detect suspicious activity by analysing CloudTrail, VPC Flow Logs, DNS logs, and more.
-
-```
-GuardDuty detects:
-• Compromised EC2 instance making DNS calls to known malware domains
-• Unusual API calls from unexpected geographic locations
-• IAM credentials used from a Tor exit node
-• S3 data exfiltration patterns
-• EC2 instance scanning ports (possible attacker)
-• Root account usage
-```
+GuardDuty continuously analyzes CloudTrail, VPC Flow Logs, DNS logs, and more for threats.
 
 ```bash
-# Enable GuardDuty (one command — it starts analysing immediately)
+# Enable GuardDuty
 aws guardduty create-detector \
   --enable \
-  --finding-publishing-frequency FIFTEEN_MINUTES
+  --finding-publishing-frequency FIFTEEN_MINUTES \
+  --data-sources '{
+    "S3Logs": {"Enable": true},
+    "Kubernetes": {"AuditLogs": {"Enable": true}},
+    "MalwareProtection": {"ScanEc2InstanceWithFindings": {"EbsVolumes": {"Enable": true}}}
+  }'
+
+DETECTOR_ID=$(aws guardduty list-detectors --query "DetectorIds[0]" --output text)
 
 # List findings
 aws guardduty list-findings \
-  --detector-id <detector-id>
+  --detector-id $DETECTOR_ID \
+  --finding-criteria '{
+    "Criterion": {
+      "severity": {"Gte": 7}   # HIGH or CRITICAL severity
+    }
+  }'
 
 # Get finding details
 aws guardduty get-findings \
-  --detector-id <detector-id> \
-  --finding-ids <finding-id>
+  --detector-id $DETECTOR_ID \
+  --finding-ids finding-id-here
 
-# Archive a finding (acknowledge and dismiss)
-aws guardduty archive-findings \
-  --detector-id <detector-id> \
-  --finding-ids <finding-id>
+# Create suppression rule (reduce noise)
+aws guardduty create-filter \
+  --detector-id $DETECTOR_ID \
+  --name suppress-scanner-activity \
+  --action ARCHIVE \
+  --finding-criteria '{
+    "Criterion": {
+      "type": {"Equals": ["Recon:EC2/PortProbeUnprotectedPort"]},
+      "resource.instanceDetails.tags.value": {"Equals": ["scanner-ec2"]}
+    }
+  }'
+
+# Enable threat intelligence feed
+aws guardduty create-threat-intel-set \
+  --detector-id $DETECTOR_ID \
+  --name known-attackers \
+  --format TXT \
+  --location s3://my-threat-intel/bad-ips.txt \
+  --activate
+```
+
+### GuardDuty Finding Types
+
+```
+High Severity (7-8.9):
+  UnauthorizedAccess:IAMUser/ConsoleLoginSuccess.B   — console login from unusual IP
+  Trojan:EC2/BlackholeTraffic                        — EC2 communicating with blackhole IP
+  CryptoCurrency:EC2/BitcoinTool.B                   — cryptocurrency mining detected
+  Backdoor:EC2/C&CActivity.B!DNS                     — DNS query to known C&C server
+
+Medium Severity (4-6.9):
+  UnauthorizedAccess:IAMUser/UnusualASNCaller          — unusual ASN accessing AWS API
+  Recon:EC2/PortProbeUnprotectedPort                  — port scan on instance
+  
+Low Severity (1-3.9):
+  Stealth:IAMUser/PasswordPolicyChange                — password policy weakened
 ```
 
 ---
 
-## 11.7 Security Hub
+## 11.6 Security Hub
 
-Security Hub aggregates security findings from GuardDuty, Inspector, Macie, WAF, Config, and third-party tools into one dashboard with a security score.
+Security Hub aggregates security findings from GuardDuty, Inspector, Macie, Config, and third-party tools.
 
 ```bash
 # Enable Security Hub
 aws securityhub enable-security-hub \
-  --enable-default-standards    # CIS AWS Foundations, FSBP
+  --enable-default-standards   # Enables AWS Foundational Security Best Practices
 
-# Get security score
-aws securityhub describe-hub
+# Enable additional standards
+aws securityhub batch-enable-standards \
+  --standards-subscription-requests '[
+    {"StandardsArn": "arn:aws:securityhub:::ruleset/cis-aws-foundations-benchmark/v/1.2.0"},
+    {"StandardsArn": "arn:aws:securityhub:us-east-1::standards/aws-foundational-security-best-practices/v/1.0.0"},
+    {"StandardsArn": "arn:aws:securityhub:us-east-1::standards/pci-dss/v/3.2.1"}
+  ]'
 
-# List findings (all services, filtered by severity)
+# Get findings
 aws securityhub get-findings \
   --filters '{
     "SeverityLabel": [{"Value": "CRITICAL", "Comparison": "EQUALS"}],
-    "RecordState": [{"Value": "ACTIVE", "Comparison": "EQUALS"}]
+    "RecordState": [{"Value": "ACTIVE", "Comparison": "EQUALS"}],
+    "WorkflowStatus": [{"Value": "NEW", "Comparison": "EQUALS"}]
   }' \
-  --query "Findings[*].[Title,SeverityLabel,ProductName]"
+  --sort-criteria '[{"Field": "CreatedAt", "SortOrder": "desc"}]'
+
+# Create custom insight (saved query)
+aws securityhub create-insight \
+  --name "Critical Findings by Account" \
+  --filters '{
+    "SeverityLabel": [{"Value": "CRITICAL", "Comparison": "EQUALS"}]
+  }' \
+  --group-by-attribute "AwsAccountId"
 ```
 
 ---
 
-## 11.8 ACM — Certificate Manager
-
-Free SSL/TLS certificates for your domains, auto-renewed.
+## 11.7 ACM — AWS Certificate Manager
 
 ```bash
-# Request a certificate
-aws acm request-certificate \
-  --domain-name "*.myapp.com" \
+# Request public certificate (DNS validation)
+CERT_ARN=$(aws acm request-certificate \
+  --domain-name example.com \
+  --subject-alternative-names "*.example.com" "api.example.com" \
   --validation-method DNS \
-  --subject-alternative-names "myapp.com" \
-  --region us-east-1   # Must be us-east-1 for CloudFront
+  --query "CertificateArn" --output text)
 
-# After DNS validation, attach to ALB via console or:
-aws elbv2 add-listener-certificates \
-  --listener-arn arn:aws:elasticloadbalancing:...:listener/... \
-  --certificates CertificateArn=arn:aws:acm:...:certificate/...
+# Get CNAME records for DNS validation
+aws acm describe-certificate \
+  --certificate-arn $CERT_ARN \
+  --query "Certificate.DomainValidationOptions[*].{Domain:DomainName,Name:ResourceRecord.Name,Value:ResourceRecord.Value,Type:ResourceRecord.Type}" \
+  --output table
+
+# Add CNAME to Route53 for automatic validation
+ZONE_ID=$(aws route53 list-hosted-zones --query "HostedZones[?Name=='example.com.'].Id" --output text | cut -d'/' -f3)
+
+aws acm describe-certificate --certificate-arn $CERT_ARN \
+  --query "Certificate.DomainValidationOptions[0].ResourceRecord" | \
+  python3 -c "
+import json, sys, subprocess
+record = json.load(sys.stdin)
+change = {
+  'Changes': [{
+    'Action': 'UPSERT',
+    'ResourceRecordSet': {
+      'Name': record['Name'],
+      'Type': record['Type'],
+      'TTL': 300,
+      'ResourceRecords': [{'Value': record['Value']}]
+    }
+  }]
+}
+print(json.dumps(change))
+" | xargs -I{} aws route53 change-resource-record-sets --hosted-zone-id $ZONE_ID --change-batch '{}'
+
+# Import private/self-signed certificate
+aws acm import-certificate \
+  --certificate fileb://certificate.pem \
+  --private-key fileb://private-key.pem \
+  --certificate-chain fileb://chain.pem
 ```
 
 ---
 
-## 11.9 Security Best Practices Summary
+## 11.8 Amazon Macie
 
-```
-┌────────────────────────────────────────────────────────────┐
-│              AWS SECURITY CHECKLIST                        │
-├────────────────────────────────────────────────────────────┤
-│ Identity                                                   │
-│ ✅ Root account MFA enabled, access keys deleted           │
-│ ✅ All IAM users have MFA                                  │
-│ ✅ Use roles, not access keys for applications             │
-│ ✅ Least privilege IAM policies                           │
-│ ✅ Regular access key rotation or use OIDC               │
-├────────────────────────────────────────────────────────────┤
-│ Data                                                       │
-│ ✅ S3 Block Public Access enabled on all buckets          │
-│ ✅ S3 encryption at rest (SSE-KMS or SSE-S3)             │
-│ ✅ RDS encrypted at rest, SSL in transit                 │
-│ ✅ Secrets in Secrets Manager, not code or env vars      │
-│ ✅ EBS volumes encrypted                                 │
-├────────────────────────────────────────────────────────────┤
-│ Network                                                    │
-│ ✅ Resources in private subnets, not public               │
-│ ✅ Security groups: least privilege (no 0.0.0.0/0 on DB) │
-│ ✅ WAF on public-facing APIs / CloudFront distributions   │
-│ ✅ VPC Flow Logs enabled                                 │
-├────────────────────────────────────────────────────────────┤
-│ Detection                                                  │
-│ ✅ GuardDuty enabled in all regions                      │
-│ ✅ CloudTrail enabled (multi-region)                     │
-│ ✅ Security Hub enabled with standards                   │
-│ ✅ Config rules for compliance monitoring                 │
-│ ✅ CloudWatch alarms on security metrics                  │
-└────────────────────────────────────────────────────────────┘
+Macie uses ML to discover and protect sensitive data (PII, credentials) in S3.
+
+```bash
+# Enable Macie
+aws macie2 enable-macie \
+  --finding-publishing-frequency FIFTEEN_MINUTES \
+  --status ENABLED
+
+# Create classification job (scan S3 bucket)
+aws macie2 create-classification-job \
+  --name scan-prod-data-lake \
+  --job-type SCHEDULED \
+  --schedule-frequency DailySchedule={} \
+  --s3-job-definition '{
+    "bucketDefinitions": [
+      {
+        "accountId": "123456789012",
+        "buckets": ["prod-data-lake", "user-uploads"]
+      }
+    ],
+    "scoping": {
+      "includes": {
+        "and": [{
+          "simpleScopeTerm": {
+            "comparator": "GT",
+            "key": "OBJECT_SIZE",
+            "values": ["1"]
+          }
+        }]
+      }
+    }
+  }' \
+  --managed-data-identifier-selector ALL \
+  --sampling-percentage 100
+
+# List findings
+aws macie2 list-findings \
+  --finding-criteria '{
+    "criterion": {
+      "severity.description": {
+        "eq": ["High", "Critical"]
+      }
+    }
+  }'
 ```
 
 ---
 
-## 11.10 Interview Questions
+## 11.9 Inspector — Vulnerability Assessment
 
-**Q: How do you securely store database passwords in AWS?**
-> Use AWS Secrets Manager. Store the DB credentials as a JSON secret encrypted with a KMS key. Grant only the Lambda/EC2 role `secretsmanager:GetSecretValue` permission on that specific secret ARN. Retrieve the secret at application startup (not on every request) and cache it. Enable automatic rotation so Secrets Manager periodically changes the password without any manual work. Never hard-code passwords or store them in environment variables.
+```bash
+# Enable Inspector
+aws inspector2 enable \
+  --resource-types EC2 LAMBDA ECR
 
-**Q: What is the difference between WAF and Shield?**
-> WAF (Web Application Firewall) operates at Layer 7 (HTTP) — it inspects request content and can block SQL injection, XSS, bad bots, and rate-limit specific IPs. Shield operates at Layer 3/4 (network) and protects against volumetric DDoS attacks (SYN floods, UDP amplification). They're complementary: Shield stops the traffic flood, WAF filters what gets through. Shield Standard is free and automatic; WAF requires configuration.
+# Get findings
+aws inspector2 list-findings \
+  --filter-criteria '{
+    "findingStatus": [{"comparison": "EQUALS", "value": "ACTIVE"}],
+    "severity": [{"comparison": "EQUALS", "value": "CRITICAL"}]
+  }' \
+  --sort-criteria field=SEVERITY,sortOrder=DESC
 
-**Q: How does GuardDuty work without agents?**
-> GuardDuty analyses existing AWS data sources — CloudTrail API logs, VPC Flow Logs, DNS query logs, and S3 access logs. It doesn't need agents on your instances. It uses ML models and threat intelligence feeds (known malicious IPs, domains) to identify anomalies. A single API call enables it region-wide. It's entirely passive — it only reads logs, never touches your resources.
+# Suppress finding (known false positive)
+aws inspector2 create-filter \
+  --action SUPPRESS \
+  --name suppress-known-false-positive \
+  --filter-criteria '{
+    "cveId": [{"comparison": "EQUALS", "value": "CVE-2021-12345"}],
+    "ec2InstanceTags": [{"comparison": "EQUALS", "key": "exempt-from-scan", "value": "true"}]
+  }'
+```
+
+---
+
+## 11.10 Interview Q&A
+
+**Q: What is KMS encryption context and why use it?**
+A: Encryption context is optional name-value pairs that are cryptographically bound to encrypted data. If you provide context during encryption, you MUST provide the exact same context during decryption. Benefits: adds authorization check (can't decrypt without context), makes the encryption non-portable (encrypted with "service=orders" context can only be decrypted with that context), creates audit log correlation. Example: encrypt a database field with context `{"user_id": "123"}` to prevent that ciphertext from being used for a different user's record.
+
+**Q: What is the difference between Secrets Manager and SSM Parameter Store?**
+A: Secrets Manager: $0.40/secret/month, supports automatic rotation (Lambda-based), cross-account sharing, 64KB values. Best for credentials needing auto-rotation. SSM Parameter Store: free (Standard tier), up to 4KB (8KB Advanced), no auto-rotation, simpler API. Best for configuration values, feature flags, non-rotating secrets. Use Secrets Manager for database passwords and API keys; use SSM for app configuration.
+
+**Q: What is envelope encryption and why does AWS use it?**
+A: Envelope encryption uses two keys: a data key (generated per dataset) and a master key (KMS). The data key encrypts actual data locally; KMS only encrypts/decrypts the data key. Benefits: (1) encrypt large amounts of data faster (symmetric local encryption vs KMS API calls); (2) each dataset gets unique key; (3) can re-encrypt by just re-encrypting the data key without touching the data. AWS S3, RDS, EBS all use envelope encryption.
+
+**Q: What types of threats does GuardDuty detect?**
+A: GuardDuty analyzes CloudTrail management/data events, VPC Flow Logs, DNS logs, EKS audit logs, and S3 access logs. It detects: account compromise (credential theft, unusual API calls), EC2 compromise (malware, crypto mining, C&C communication), S3 threats (unusual access patterns, data exfiltration), Kubernetes threats (privilege escalation, exposed dashboards), and malware in EBS volumes. All detection uses threat intelligence feeds and ML baselines.
+
+**Q: What AWS managed WAF rules should you always enable?**
+A: At minimum: (1) AWSManagedRulesCommonRuleSet — OWASP Top 10 (SQLi, XSS, RFI, LFI); (2) AWSManagedRulesKnownBadInputsRuleSet — known attack patterns; (3) AWSManagedRulesBotControlRuleSet — bot management; (4) Rate-based rules — DDoS mitigation. For specific stacks: AWSManagedRulesWordPressRuleSet for WordPress, AWSManagedRulesSQLiRuleSet for databases. Start in Count mode before switching to Block to avoid false positives.
+
+**Q: What is the difference between Shield Standard and Shield Advanced?**
+A: Shield Standard is automatic, free, provides protection against common L3/L4 DDoS attacks for all AWS resources. Shield Advanced ($3,000/month + data transfer fees) adds: L7 application-layer protection with WAF integration, 24/7 access to AWS DDoS Response Team (DRT), near-real-time attack visibility, cost protection (credits for scaling costs during attack), and protection for resources by IP address.
+
+**Q: How does ACM integrate with other services?**
+A: ACM certificates are natively integrated with: ALB/NLB (attach in listener configuration), CloudFront (requires us-east-1 region), API Gateway, Elastic Beanstalk, and ECS (via ALB). ACM handles automatic renewal of certificates before expiration. Public certificates are free; private certificates have an ACM Private CA fee. ACM certificates cannot be downloaded/exported (except through ACM Private CA for internal CAs).
