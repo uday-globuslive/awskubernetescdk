@@ -1,4 +1,5 @@
-# Chapter 7: Monitoring — CloudWatch, CloudTrail & AWS Config
+
+content = r"""# Chapter 7: Monitoring — CloudWatch, CloudTrail & AWS Config
 ## (Eyes and Ears of Your AWS Environment)
 
 ---
@@ -836,3 +837,9 @@ Explanation: Config auto-remediation triggers the configured SSM Automation docu
 | Config Rules | Compliance checks | 100+ managed rules + custom Lambda rules |
 | Config Remediation | Auto-fix | SSM Automation on non-compliant resources |
 | EventBridge | Event routing | When X happens, do Y; cron scheduling |
+"""
+
+with open(r"e:\fastapi\aws-admin\07_Monitoring_CloudWatch_Config.md", "w", encoding="utf-8") as f:
+    f.write(content)
+
+print(f"Written {len(content.splitlines())} lines")

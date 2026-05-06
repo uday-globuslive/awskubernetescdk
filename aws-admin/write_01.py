@@ -1,4 +1,5 @@
-# Chapter 1: AWS Fundamentals & Global Infrastructure
+
+content = r"""# Chapter 1: AWS Fundamentals & Global Infrastructure
 ## (Explained From Absolute Zero — Simple, Clear, Deep)
 
 ---
@@ -1544,3 +1545,9 @@ Explanation: Service Control Policies are HIGHER than IAM policies in the permis
 | **Spot Instances** | Up to 90% off; can be interrupted with 2-min notice; for batch/flexible workloads ONLY |
 | **Well-Architected** | 6 pillars: Operational Excellence, Security, Reliability, Performance Efficiency, Cost Optimization, Sustainability |
 | **Trusted Advisor** | Free robot scanning your account for waste, security holes, performance issues, fault tolerance gaps; ALL checks require Business plan |
+"""
+
+with open(r"e:\fastapi\aws-admin\01_AWS_Fundamentals_Global_Infrastructure.md", "w", encoding="utf-8") as f:
+    f.write(content)
+
+print(f"Written {len(content.splitlines())} lines")

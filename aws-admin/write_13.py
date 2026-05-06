@@ -1,4 +1,5 @@
-# Chapter 13: Migration & Hybrid Cloud
+
+content = r"""# Chapter 13: Migration & Hybrid Cloud
 ## (Moving to AWS and Connecting Your On-Premises World)
 
 ---
@@ -655,3 +656,9 @@ Explanation: AWS Direct Connect provides a private, dedicated network connection
 | Direct Connect | Private dedicated network | Not internet; compliance; consistent performance |
 | Site-to-Site VPN | Encrypted internet tunnel | Quick setup; variable performance |
 | Outposts | AWS in your DC | Low latency; data residency requirements |
+"""
+
+with open(r"e:\fastapi\aws-admin\13_Migration_HybridCloud.md", "w", encoding="utf-8") as f:
+    f.write(content)
+
+print(f"Written {len(content.splitlines())} lines")

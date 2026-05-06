@@ -1,4 +1,5 @@
-# Chapter 5: Networking — VPC, Subnets, Security Groups & Advanced Topics
+
+content = r"""# Chapter 5: Networking — VPC, Subnets, Security Groups & Advanced Topics
 ## (Your Private Network in AWS — From Basics to Enterprise)
 
 ---
@@ -839,3 +840,9 @@ Explanation: VPC Peering requires non-overlapping CIDR blocks. Both VPCs using 1
 | Gateway Endpoints | FREE access to S3 and DynamoDB from private subnets |
 | Interface Endpoints | Private access to 100+ AWS services; hourly charge |
 | Flow Logs | Captures network metadata (not content); troubleshooting and security analysis |
+"""
+
+with open(r"e:\fastapi\aws-admin\05_Networking_VPC_Advanced.md", "w", encoding="utf-8") as f:
+    f.write(content)
+
+print(f"Written {len(content.splitlines())} lines")

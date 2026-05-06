@@ -1,4 +1,5 @@
-# Chapter 3: EC2 — Elastic Compute Cloud & Auto Scaling
+
+content = r"""# Chapter 3: EC2 — Elastic Compute Cloud & Auto Scaling
 ## (Virtual Servers in the Cloud — From Zero to Production Ready)
 
 ---
@@ -1323,3 +1324,9 @@ Explanation: Target tracking scaling DOES support scale-in, but there are two re
 | ALB | Layer 7 HTTP/HTTPS; path/host-based routing; use for web apps and APIs |
 | NLB | Layer 4 TCP/UDP; extreme performance; static IPs; use for non-HTTP or high-performance |
 | Purchasing | On-Demand=flexible; RI=commit 1-3yr save 72%; Spot=90% off interruptible; Dedicated=licensing |
+"""
+
+with open(r"e:\fastapi\aws-admin\03_EC2_Compute_AutoScaling.md", "w", encoding="utf-8") as f:
+    f.write(content)
+
+print(f"Written {len(content.splitlines())} lines")

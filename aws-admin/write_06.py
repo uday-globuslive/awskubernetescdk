@@ -1,4 +1,5 @@
-# Chapter 6: Databases — RDS, Aurora, DynamoDB & ElastiCache
+
+content = r"""# Chapter 6: Databases — RDS, Aurora, DynamoDB & ElastiCache
 ## (How AWS Manages Your Data — From SQL to NoSQL)
 
 ---
@@ -906,3 +907,9 @@ Explanation: Aurora supports up to 15 read replicas in a cluster. Each replica s
 | ElastiCache Memcached | Simple in-memory | Pure object caching, multi-threaded |
 | DocumentDB | Document (MongoDB) | JSON documents, MongoDB migrations |
 | DMS | Migration tool | Migrate any database to AWS |
+"""
+
+with open(r"e:\fastapi\aws-admin\06_Databases_RDS_DynamoDB.md", "w", encoding="utf-8") as f:
+    f.write(content)
+
+print(f"Written {len(content.splitlines())} lines")

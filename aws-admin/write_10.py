@@ -1,4 +1,5 @@
-# Chapter 10: Security, Compliance & KMS
+
+content = r"""# Chapter 10: Security, Compliance & KMS
 ## (Protecting Everything — Encryption, Secrets, and Threat Detection)
 
 ---
@@ -729,3 +730,9 @@ Explanation: Envelope encryption is a two-layer encryption pattern: (1) Generate
 | Security Hub | Central dashboard | Aggregates GuardDuty + Inspector + Config + Macie |
 | Macie | S3 data discovery | Finds PII/financial/health data in S3 using ML |
 | IAM Access Analyzer | External access | Finds resources accessible from outside your account |
+"""
+
+with open(r"e:\fastapi\aws-admin\10_Security_Compliance_KMS.md", "w", encoding="utf-8") as f:
+    f.write(content)
+
+print(f"Written {len(content.splitlines())} lines")

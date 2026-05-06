@@ -1,4 +1,5 @@
-# Chapter 12: Serverless, Containers & Messaging
+
+content = r"""# Chapter 12: Serverless, Containers & Messaging
 ## (Modern Application Architectures)
 
 ---
@@ -755,3 +756,9 @@ Explanation: Lambda Provisioned Concurrency pre-initializes a specified number o
 | SNS | Pub/sub messaging | Fan-out; one publish → many subscribers |
 | Kinesis Streams | Real-time streaming | Multiple consumers; 7-day retention |
 | Kinesis Firehose | Managed delivery | Streams to S3/Redshift/OpenSearch |
+"""
+
+with open(r"e:\fastapi\aws-admin\12_Serverless_Containers_Messaging.md", "w", encoding="utf-8") as f:
+    f.write(content)
+
+print(f"Written {len(content.splitlines())} lines")

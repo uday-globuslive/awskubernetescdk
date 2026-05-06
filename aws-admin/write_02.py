@@ -1,4 +1,5 @@
-# Chapter 2: IAM — Identity and Access Management
+
+content = r"""# Chapter 2: IAM — Identity and Access Management
 ## (Who Can Do What in AWS — Explained Simply)
 
 ---
@@ -1319,3 +1320,9 @@ Explanation: Permission boundaries define the MAXIMUM set of permissions that an
 | Evaluation Logic | Explicit Deny > SCP > Resource Policy > IAM Policy > Permission Boundary > Implicit Deny |
 | Access Keys | Long-lived; rotate every 90 days; NEVER commit to git; prefer roles instead |
 | Root Account | Ultimate power; protect with MFA; NEVER use for daily tasks; no access keys |
+"""
+
+with open(r"e:\fastapi\aws-admin\02_IAM_Security_Identity.md", "w", encoding="utf-8") as f:
+    f.write(content)
+
+print(f"Written {len(content.splitlines())} lines")

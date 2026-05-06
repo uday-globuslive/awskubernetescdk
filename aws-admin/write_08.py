@@ -1,4 +1,5 @@
-# Chapter 8: High Availability & Disaster Recovery
+
+content = r"""# Chapter 8: High Availability & Disaster Recovery
 ## (Never Go Down — Planning for Failure Before It Happens)
 
 ---
@@ -714,3 +715,9 @@ Explanation: AWS Fault Injection Simulator (FIS) is specifically designed for ch
 | AWS Backup | Centralized backup; cross-service; compliance reporting |
 | Backup Vault Lock | WORM backups; cannot delete before retention; even root blocked |
 | Chaos Engineering / FIS | Test DR by injecting real failures in controlled manner |
+"""
+
+with open(r"e:\fastapi\aws-admin\08_HighAvailability_DisasterRecovery.md", "w", encoding="utf-8") as f:
+    f.write(content)
+
+print(f"Written {len(content.splitlines())} lines")

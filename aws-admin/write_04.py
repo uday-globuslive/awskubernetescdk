@@ -1,4 +1,5 @@
-# Chapter 4: Storage — S3, EFS, Glacier & More
+
+content = r"""# Chapter 4: Storage — S3, EFS, Glacier & More
 ## (Where Your Data Lives — Every Option Explained Clearly)
 
 ---
@@ -1258,3 +1259,9 @@ Explanation: S3 Object Lock in Compliance mode creates a truly immutable object 
 | FSx | Windows-native (SMB), Lustre (HPC/ML), NetApp (enterprise features) |
 | Storage Gateway | Bridge on-premises to cloud; S3 File GW, Tape GW, Volume GW |
 | AWS Backup | Centralized backup for EC2/EBS/RDS/DynamoDB/EFS; compliance reporting |
+"""
+
+with open(r"e:\fastapi\aws-admin\04_Storage_S3_EFS_Glacier.md", "w", encoding="utf-8") as f:
+    f.write(content)
+
+print(f"Written {len(content.splitlines())} lines")

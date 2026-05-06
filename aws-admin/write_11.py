@@ -1,4 +1,5 @@
-# Chapter 11: Cost & Performance Optimization
+
+content = r"""# Chapter 11: Cost & Performance Optimization
 ## (Spending Less While Running Faster)
 
 ---
@@ -541,3 +542,9 @@ Explanation: S3 Glacier Instant Retrieval is designed for data accessed once a q
 | Cost Allocation Tags | Split costs by team | Tag resources + activate in Billing Console |
 | S3 Lifecycle Policies | Tiered storage costs | Automatically move to cheaper classes |
 | Trusted Advisor | Multi-category checks | Cost + Security + Performance + Fault Tolerance |
+"""
+
+with open(r"e:\fastapi\aws-admin\11_Cost_Performance_Optimization.md", "w", encoding="utf-8") as f:
+    f.write(content)
+
+print(f"Written {len(content.splitlines())} lines")

@@ -1,4 +1,5 @@
-# Chapter 9: Deployment, Automation & Systems Manager
+
+content = r"""# Chapter 9: Deployment, Automation & Systems Manager
 ## (How Professionals Deploy and Manage AWS at Scale)
 
 ---
@@ -779,3 +780,9 @@ Explanation: When CloudFormation "replaces" an RDS instance, it deletes the old 
 | SSM Automation | Complex operations | Multi-step workflows; approvals; cross-service |
 | CodeDeploy | App deployments | Blue/Green, rolling; automatic rollback on failure |
 | Elastic Beanstalk | PaaS | You deploy code; AWS manages infrastructure |
+"""
+
+with open(r"e:\fastapi\aws-admin\09_Deployment_Automation_SystemsManager.md", "w", encoding="utf-8") as f:
+    f.write(content)
+
+print(f"Written {len(content.splitlines())} lines")

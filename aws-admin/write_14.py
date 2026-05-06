@@ -1,4 +1,5 @@
-# Chapter 14: Real-World Projects & Exam Preparation
+
+content = r"""# Chapter 14: Real-World Projects & Exam Preparation
 ## (Put It All Together)
 
 ---
@@ -697,3 +698,9 @@ Before taking the exam, make sure you can answer these questions:
 - [ ] How do you create a custom metric?
 
 **Good luck on the exam! Remember: AWS exams reward you for knowing WHEN to use each service, not just WHAT each service does.**
+"""
+
+with open(r"e:\fastapi\aws-admin\14_RealWorld_Projects_ExamPrep.md", "w", encoding="utf-8") as f:
+    f.write(content)
+
+print(f"Written {len(content.splitlines())} lines")
